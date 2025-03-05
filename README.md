@@ -1,5 +1,5 @@
 # Titans of Energy
-A Robust Pipeline to train new virtual clones of historical characters, starting with Oppenheimer
+A Robust Pipeline to train new virtual clones of historical characters, starting with Oppenheimer.
 
 ## Project Plan
 
