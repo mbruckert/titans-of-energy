@@ -93,9 +93,7 @@ dist
 
 # Gatsby files
 .cache/
-# Comment in the public line in if your project uses Gatsby and not Next.js
-# https://nextjs.org/blog/next-9-1#public-directory-support
-# public
+# public  # Uncomment if using Gatsby instead of Next.js
 
 # vuepress build output
 .vuepress/dist
@@ -128,3 +126,42 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# VSCode settings
+.vscode/
+
+# React
+build/
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+htmlcov/
+.tox/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.pyright/
+
+# macOS system files
+.DS_Store
+
+# Linux/macOS thumbnail cache
+._*
+
+# JetBrains IDEs
+.idea/
+
+# System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
