@@ -1,0 +1,50 @@
+# Ignore the virtual environment directory
+.venv/
+venv/
+env/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore IDE-specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore KeyBERT and other model caches
+.cache/
+*.bin
+*.pt
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore pipenv and poetry files
+Pipfile
+Pipfile.lock
+poetry.lock
+pyproject.toml
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore logs
+*.log
+logs/
+
+# Ignore compiled files
+*.so
+*.dll
+*.dylib
+
+# Ignore distribution files
+dist/
+build/
+*.egg-info/
+
+# --- .env for API keys ---
+.env
