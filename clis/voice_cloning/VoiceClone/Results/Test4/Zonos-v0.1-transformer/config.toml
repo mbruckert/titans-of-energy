@@ -1,0 +1,5 @@
+model = "Zyphra/Zonos-v0.1-transformer"
+ref_audio = "Results/Test4/AudioPreProcessing/remove_silence_output.wav"
+ref_text = "of course the initial discovery and its interpretation in early 1939 attracted everybody's interest."
+gen_text = "My name is Robert J Oppenheimer and welcome to the Titans of Energy statue exhibit at the Oak Ridge National Laboratory."
+output_dir = "/home/styx/Videos/VoiceClone/Results/Test4/Zonos-v0.1-transformer"
