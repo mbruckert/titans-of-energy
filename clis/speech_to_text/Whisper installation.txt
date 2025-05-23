@@ -1,0 +1,23 @@
+Whisper installation
+
+In use Whisper in Python, you need to install FFMPEG, a library that Whisper utilizes. The link below will take you to the homepage, and the next link is a direct download link you can copy and paste onto chrome
+
+Homepage:https://www.gyan.dev/ffmpeg/builds/
+Download link: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-2025-05-15-git-12b853530a-essentials_build.7z
+
+This download will have the essential FFMPEG you will need to allow you to use Whisper model large.
+
+Once you have downloaded the file to location in a computer you will need to alter your systems variables, the following below is a step by step guide on how to apply this change in WINDOW.
+
+1. Press the "window" key and the "S" key to pull up the search bar and search for "Edit the system environment variables"
+
+2. Once it pops up, you will click "Environment Variable ..."
+
+3. Look in the "System variables" table and select the "Path" variable.
+
+4. While the "Path" variable is selected, click the "Edit..." button.
+
+5. A new window will pop up, here click the "New", it will ask for an input
+
+6. The input will be the file path to FFMPEG bin folder, below is a sample file path 
+	"C:\Users\Ishan Patel\Downloads\ffmpeg-2025-05-15-git-12b853530a-essentials_build\ffmpeg-2025-05-15-git-12b853530a-essentials_build\bin"
