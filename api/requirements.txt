@@ -1,0 +1,7 @@
+flask
+openai
+chromadb
+keybert
+spacy
+soundfile
+llama-cpp-python
