@@ -1,0 +1,218 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Environment variables and secrets
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+*.env
+
+# API Keys and sensitive configuration
+config/secrets.py
+secrets.json
+credentials.json
+
+# Models and large files
+models/
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.h5
+*.pkl
+*.joblib
+
+# Audio files and generated content
+storage/
+generated_audio/
+audio_samples/
+recordings/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+chromadb/
+vector_store/
+
+# Logs
+logs/
+*.log
+log.txt
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust (for deepfilternet compilation)
+target/
+Cargo.lock
+
+# Node.js (if any frontend components)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker
+.dockerignore
+Dockerfile.dev
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Test files
+test_audio/
+test_recordings/
+test_output/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Local development
+.local/
+local_config.py
+dev_settings.py
+
+# Hugging Face cache
+.cache/
+transformers_cache/
+huggingface/
+
+# TTS model caches
+tts_models/
+.tts/
+
+# spaCy models (downloaded via script)
+# Keep this commented if you want to track downloaded models
+# en_core_web_sm/
+
+# Flask session files
+flask_session/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Redis dump
+dump.rdb
+
+# Profiling
+*.prof
+
+# Coverage reports
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# Translations
+*.mo
+*.pot
+
+# PyBuilder
+.pybuilder/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# IMPORTANT: Allow all file types in test_data directories
+# These negation patterns must come LAST to override all previous exclusions
+!test_data/
+!**/test_data/
+!test_data/**
+!**/test_data/**
