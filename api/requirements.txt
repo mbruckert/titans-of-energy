@@ -46,3 +46,5 @@ pygame==2.6.1  # For audio playback in transcription examples
 flask==3.1.1
 flask-cors==6.0.0
 psycopg2-binary==2.9.10
+
+openai-whisper

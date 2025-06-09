@@ -1,5 +1,5 @@
 """
-LLM inference module supporting multiple model types.
+LLM inference module supporting multiple model types with hardware optimization.
 
 This module handles loading and text generation for:
 - GGUF models via llama-cpp-python
@@ -18,6 +18,16 @@ from chromadb import PersistentClient
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# Import device optimization utilities
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+try:
+    from device_optimization import get_device_info, get_optimized_config, print_device_info, DeviceType
+    DEVICE_OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    print("Warning: Device optimization not available. Using default configurations.")
+    DEVICE_OPTIMIZATION_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -32,12 +42,26 @@ CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "chroma_db")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-# Hardware detection
+# Hardware detection with device optimization
 IS_MACOS = platform.system() == "Darwin"
 IS_APPLE_SILICON = IS_MACOS and platform.machine() == "arm64"
 CPU_COUNT = multiprocessing.cpu_count()
 OPTIMAL_THREADS = min(
     CPU_COUNT, 8) if not IS_APPLE_SILICON else min(CPU_COUNT, 6)
+
+# Global device info cache
+_device_type = None
+_device_info = None
+
+
+def _get_device_optimization():
+    """Get cached device optimization info."""
+    global _device_type, _device_info
+    if DEVICE_OPTIMIZATION_AVAILABLE and (_device_type is None or _device_info is None):
+        _device_type, _device_info = get_device_info()
+        print_device_info(_device_type, _device_info)
+    return _device_type, _device_info
+
 
 # Initialize clients for style retrieval
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -135,10 +159,12 @@ def generate_styled_text(
     examples: List[str],
     knowledge: str,
     model: str,
-    model_config: Dict[str, Any]
+    model_config: Dict[str, Any],
+    character_name: Optional[str] = None
 ) -> str:
     """
     Generate styled text using either OpenAI-compatible API or local models.
+    Now supports using cached models for better performance.
 
     Args:
         query: The question/prompt to generate a response for
@@ -146,6 +172,7 @@ def generate_styled_text(
         knowledge: Additional knowledge/context
         model: Model name/path to use
         model_config: Configuration for the model
+        character_name: Character name for cache lookup (optional)
 
     Returns:
         Generated response text
@@ -176,17 +203,83 @@ def generate_styled_text(
 
     # Add the query
     prompt_parts.append(f"User: {query}")
-    prompt_parts.append("Assistant: ")
+    prompt_parts.append("Assistant:")
 
     prompt = "\n".join(prompt_parts)
 
-    # Determine model type based on configuration
-    if 'api_key' in model_config and 'base_url' in model_config:
-        # OpenAI-compatible API
+    # Try to use cached model first if character_name is provided
+    if character_name:
+        cache_key = f"{character_name}_llm"
+        cached_model = get_cached_model(cache_key)
+        if cached_model:
+            print(f"Using cached LLM model for {character_name}")
+            return cached_model.generate(prompt, **model_config)
+
+    # Determine model type and generate
+    if 'api_key' in model_config:
         return _generate_with_api(prompt, model, model_config)
     else:
-        # Local model
         return _generate_with_local_model(prompt, model, model_config)
+
+
+def generate_styled_text_with_cached_model(
+    query: str,
+    examples: List[str],
+    knowledge: str,
+    cache_key: str,
+    generation_config: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Generate styled text using a specific cached model.
+
+    Args:
+        query: The question/prompt to generate a response for
+        examples: List of style example strings
+        knowledge: Additional knowledge/context
+        cache_key: Cache key for the model to use
+        generation_config: Generation parameters (temperature, max_tokens, etc.)
+
+    Returns:
+        Generated response text
+
+    Raises:
+        ModelLoadError: If cached model not found
+        Exception: If generation fails
+    """
+    # Get cached model
+    model = get_cached_model(cache_key)
+    if model is None:
+        raise ModelLoadError(f"No cached model found with key: {cache_key}")
+
+    # Build the prompt
+    prompt_parts = []
+
+    # Add system prompt if provided in generation config
+    if generation_config and 'system_prompt' in generation_config:
+        prompt_parts.append(generation_config['system_prompt'])
+
+    # Add style examples
+    if examples:
+        prompt_parts.append("Here are some examples of the desired style:")
+        for example in examples:
+            prompt_parts.append(example)
+        prompt_parts.append("")  # Empty line
+
+    # Add knowledge context
+    if knowledge.strip():
+        prompt_parts.append("Additional context:")
+        prompt_parts.append(knowledge)
+        prompt_parts.append("")  # Empty line
+
+    # Add the query
+    prompt_parts.append(f"User: {query}")
+    prompt_parts.append("Assistant:")
+
+    prompt = "\n".join(prompt_parts)
+
+    # Generate using cached model
+    generation_params = generation_config or {}
+    return model.generate(prompt, **generation_params)
 
 
 def _generate_with_api(prompt: str, model: str, model_config: Dict[str, Any]) -> str:
@@ -265,7 +358,7 @@ def _generate_with_local_model(prompt: str, model: str, model_config: Dict[str, 
 
 
 def _generate_with_gguf(prompt: str, model_path: str, model_config: Dict[str, Any]) -> str:
-    """Generate text using GGUF model."""
+    """Generate text using GGUF model with hardware optimization."""
     try:
         from llama_cpp import Llama
     except ImportError:
@@ -275,7 +368,10 @@ def _generate_with_gguf(prompt: str, model_path: str, model_config: Dict[str, An
         )
 
     try:
-        # Configure GGUF model
+        # Get device optimization info
+        device_type, device_info = _get_device_optimization()
+
+        # Configure GGUF model with device optimization
         gguf_config = {
             "model_path": model_path,
             "n_ctx": model_config.get("context_length", 4096),
@@ -292,14 +388,48 @@ def _generate_with_gguf(prompt: str, model_path: str, model_config: Dict[str, An
             "offload_kqv": True,
         }
 
-        # Apple Silicon optimizations
-        if IS_APPLE_SILICON:
-            batch_size = model_config.get("batch_size", 1024)
-            gguf_config.update({
-                "n_batch": min(batch_size * 2, 2048),
-                "n_ubatch": min(batch_size, 1024),
-                "use_mlock": False,
-            })
+        # Apply device-specific optimizations
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            if device_type == DeviceType.NVIDIA_GPU:
+                gguf_config.update({
+                    "n_gpu_layers": device_info.get("llm_gpu_layers", -1),
+                    "n_batch": device_info.get("llm_batch_size", 2048),
+                    "n_ubatch": device_info.get("llm_batch_size", 2048) // 2,
+                    "n_ctx": device_info.get("llm_context_length", 8192),
+                    "n_threads": device_info.get("llm_threads", 8),
+                    "flash_attn": device_info.get("llm_use_flash_attention", True),
+                    "use_mlock": True,
+                    "use_mmap": True,
+                    "offload_kqv": True,
+                })
+                print(
+                    f"Applied NVIDIA GPU optimizations for {device_info.get('device_name', 'GPU')}")
+
+            elif device_type == DeviceType.APPLE_SILICON:
+                batch_size = device_info.get("llm_batch_size", 1024)
+                gguf_config.update({
+                    "n_gpu_layers": 0,  # Use CPU for Apple Silicon
+                    "n_batch": min(batch_size * 2, 2048),
+                    "n_ubatch": min(batch_size, 1024),
+                    "n_ctx": device_info.get("llm_context_length", 8192),
+                    "n_threads": device_info.get("llm_threads", 6),
+                    "use_mlock": False,  # Disable mlock on macOS
+                    "use_mmap": True,
+                    "flash_attn": False,  # Disable flash attention on Apple Silicon
+                })
+                print(
+                    f"Applied Apple Silicon optimizations for {device_info.get('device_name', 'Apple Silicon')}")
+
+            else:  # CPU or other
+                gguf_config.update({
+                    "n_gpu_layers": 0,
+                    "n_batch": device_info.get("llm_batch_size", 512),
+                    "n_ubatch": device_info.get("llm_batch_size", 512) // 2,
+                    "n_ctx": device_info.get("llm_context_length", 2048),
+                    "n_threads": device_info.get("llm_threads", 8),
+                    "flash_attn": False,
+                })
+                print(f"Applied CPU optimizations")
 
         # Load model
         llama_model = Llama(**gguf_config)
@@ -319,24 +449,19 @@ def _generate_with_gguf(prompt: str, model_path: str, model_config: Dict[str, An
 
         generated_text = response['choices'][0]['text'].strip()
 
-        # Additional cleanup for stop tokens
-        stop_tokens = model_config.get('stop_tokens', [
-            "\nUser:", "\nAssistant:", "<STOP>", "\nSystem:",
-            "User:", "Assistant:", "System:"
-        ])
+        # Clean up response
+        for stop_token in model_config.get('stop_tokens', []):
+            if stop_token in generated_text:
+                generated_text = generated_text.split(stop_token)[0].strip()
 
-        for token in stop_tokens:
-            if token in generated_text:
-                generated_text = generated_text.split(token)[0]
-
-        return generated_text.strip()
+        return generated_text
 
     except Exception as e:
-        raise Exception(f"GGUF generation failed: {e}")
+        raise RuntimeError(f"GGUF generation failed: {str(e)}")
 
 
 def _generate_with_huggingface(prompt: str, model_path: str, model_config: Dict[str, Any]) -> str:
-    """Generate text using Hugging Face model."""
+    """Generate text using Hugging Face model with hardware optimization."""
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
@@ -347,18 +472,62 @@ def _generate_with_huggingface(prompt: str, model_path: str, model_config: Dict[
         )
 
     try:
+        # Get device optimization info
+        device_type, device_info = _get_device_optimization()
+
         # Authenticate with Hugging Face before loading
         _authenticate_huggingface()
 
+        # Determine device and dtype based on optimization
+        device = "auto"
+        torch_dtype = torch.float16
+
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            if device_type == DeviceType.NVIDIA_GPU:
+                device = device_info.get("torch_device", "cuda:0")
+                torch_dtype = torch.float16 if device_info.get(
+                    "mixed_precision", True) else torch.float32
+                print(
+                    f"Using NVIDIA GPU optimization: device={device}, dtype={torch_dtype}")
+            elif device_type == DeviceType.APPLE_SILICON:
+                device = device_info.get("torch_device", "mps") if device_info.get(
+                    "torch_device") == "mps" else "cpu"
+                torch_dtype = torch.float32  # MPS works better with float32
+                print(
+                    f"Using Apple Silicon optimization: device={device}, dtype={torch_dtype}")
+            else:
+                device = "cpu"
+                torch_dtype = torch.float32
+                print(
+                    f"Using CPU optimization: device={device}, dtype={torch_dtype}")
+
         # Load tokenizer and model
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        model_kwargs = {
+            "torch_dtype": torch_dtype,
+            "device_map": device,
+            "low_cpu_mem_usage": True
+        }
+
+        # Add device-specific optimizations
+        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+            if device_info.get("enable_memory_efficient_attention", True):
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+            if not device_info.get("gradient_checkpointing", True):
+                model_kwargs["use_cache"] = True
+
         model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=getattr(torch, model_config.get(
-                "torch_dtype", "float16")),
-            device_map=model_config.get("device", "auto"),
-            low_cpu_mem_usage=True
-        )
+            model_path, **model_kwargs)
+
+        # Apply model optimizations
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            if device_type == DeviceType.NVIDIA_GPU and device_info.get("tts_compile", False):
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                    print("Applied torch.compile optimization to Hugging Face model")
+                except Exception as e:
+                    print(f"Warning: Could not apply torch.compile: {e}")
 
         # Set pad token if not present
         if tokenizer.pad_token is None:
@@ -368,43 +537,45 @@ def _generate_with_huggingface(prompt: str, model_path: str, model_config: Dict[
         inputs = tokenizer(prompt, return_tensors="pt", padding=True)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        # Generation parameters
+        # Generation parameters with device optimization
         max_new_tokens = model_config.get("max_tokens", 200)
         temperature = model_config.get("temperature", 0.7)
         top_p = model_config.get("top_p", 0.9)
         do_sample = temperature > 0
 
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature if do_sample else None,
+            "top_p": top_p if do_sample else None,
+            "do_sample": do_sample,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "repetition_penalty": model_config.get("repetition_penalty", 1.1)
+        }
+
+        # Add device-specific generation optimizations
+        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+            if device_info.get("enable_memory_efficient_attention", True):
+                generation_kwargs["use_cache"] = True
+
         # Generate
         with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature if do_sample else None,
-                top_p=top_p if do_sample else None,
-                do_sample=do_sample,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                repetition_penalty=model_config.get("repetition_penalty", 1.1)
-            )
+            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU and device_info.get("mixed_precision", True):
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    outputs = model.generate(**inputs, **generation_kwargs)
+            else:
+                outputs = model.generate(**inputs, **generation_kwargs)
 
-        # Decode only the new tokens
-        new_tokens = outputs[0][inputs['input_ids'].shape[1]:]
-        generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        # Decode response
+        generated_text = tokenizer.decode(
+            outputs[0][len(inputs['input_ids'][0]):],
+            skip_special_tokens=True
+        ).strip()
 
-        # Clean up stop tokens
-        stop_tokens = model_config.get('stop_tokens', [
-            "\nUser:", "\nAssistant:", "<STOP>", "\nSystem:",
-            "User:", "Assistant:", "System:"
-        ])
-
-        for token in stop_tokens:
-            if token in generated_text:
-                generated_text = generated_text.split(token)[0]
-
-        return generated_text.strip()
+        return generated_text
 
     except Exception as e:
-        raise Exception(f"Hugging Face generation failed: {e}")
+        raise RuntimeError(f"Hugging Face generation failed: {str(e)}")
 
 
 class BaseModel(ABC):
@@ -436,7 +607,7 @@ class BaseModel(ABC):
 
 
 class GGUFModel(BaseModel):
-    """GGUF model implementation using llama-cpp-python."""
+    """GGUF model implementation using llama-cpp-python with hardware optimization."""
 
     def load(self) -> Any:
         """Load GGUF model with optimized configuration."""
@@ -461,7 +632,7 @@ class GGUFModel(BaseModel):
         print(f"Detected system: {platform.system()} {platform.machine()}")
         print(f"Using {OPTIMAL_THREADS} threads for optimal performance")
 
-        # Get model configuration
+        # Get model configuration with device optimization
         model_config = self._get_model_config(model_path)
 
         try:
@@ -472,7 +643,10 @@ class GGUFModel(BaseModel):
             raise ModelLoadError(f"Failed to load GGUF model: {e}")
 
     def _get_model_config(self, model_path: str) -> Dict[str, Any]:
-        """Get optimized GGUF model configuration."""
+        """Get optimized GGUF model configuration with device optimization."""
+        # Get device optimization info
+        device_type, device_info = _get_device_optimization()
+
         base_config = {
             "model_path": model_path,
             "n_ctx": self.config.get("context_length", 4096),
@@ -489,14 +663,48 @@ class GGUFModel(BaseModel):
             "offload_kqv": True,
         }
 
-        # Apple Silicon specific optimizations
-        if IS_APPLE_SILICON:
-            batch_size = self.config.get("batch_size", 1024)
-            base_config.update({
-                "n_batch": min(batch_size * 2, 2048),
-                "n_ubatch": min(batch_size, 1024),
-                "use_mlock": False,
-            })
+        # Apply device-specific optimizations
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            if device_type == DeviceType.NVIDIA_GPU:
+                base_config.update({
+                    "n_gpu_layers": device_info.get("llm_gpu_layers", -1),
+                    "n_batch": device_info.get("llm_batch_size", 2048),
+                    "n_ubatch": device_info.get("llm_batch_size", 2048) // 2,
+                    "n_ctx": device_info.get("llm_context_length", 8192),
+                    "n_threads": device_info.get("llm_threads", 8),
+                    "flash_attn": device_info.get("llm_use_flash_attention", True),
+                    "use_mlock": True,
+                    "use_mmap": True,
+                    "offload_kqv": True,
+                })
+                print(
+                    f"Applied NVIDIA GPU optimizations for {device_info.get('device_name', 'GPU')}")
+
+            elif device_type == DeviceType.APPLE_SILICON:
+                batch_size = device_info.get("llm_batch_size", 1024)
+                base_config.update({
+                    "n_gpu_layers": 0,  # Use CPU for Apple Silicon GGUF
+                    "n_batch": min(batch_size * 2, 2048),
+                    "n_ubatch": min(batch_size, 1024),
+                    "n_ctx": device_info.get("llm_context_length", 8192),
+                    "n_threads": device_info.get("llm_threads", 6),
+                    "use_mlock": False,  # Disable mlock on macOS
+                    "use_mmap": True,
+                    "flash_attn": False,  # Disable flash attention on Apple Silicon
+                })
+                print(
+                    f"Applied Apple Silicon optimizations for {device_info.get('device_name', 'Apple Silicon')}")
+
+            else:  # CPU or other
+                base_config.update({
+                    "n_gpu_layers": 0,
+                    "n_batch": device_info.get("llm_batch_size", 512),
+                    "n_ubatch": device_info.get("llm_batch_size", 512) // 2,
+                    "n_ctx": device_info.get("llm_context_length", 2048),
+                    "n_threads": device_info.get("llm_threads", 8),
+                    "flash_attn": False,
+                })
+                print(f"Applied CPU optimizations")
 
         return base_config
 
@@ -543,27 +751,27 @@ class GGUFModel(BaseModel):
 
 
 class HuggingFaceModel(BaseModel):
-    """Hugging Face transformers model implementation."""
+    """Hugging Face transformers model implementation with hardware optimization."""
 
     def load(self) -> Any:
-        """Load Hugging Face model."""
+        """Load Hugging Face model with hardware optimization."""
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             import torch
         except ImportError:
             raise ImportError(
                 "transformers and torch are required for Hugging Face model support.\n"
-                "Install with: pip install transformers torch"
+                "Install them with: pip install transformers torch"
             )
-
-        model_name = self.config.get("model_name")
-        if not model_name:
-            raise ValueError("model_name is required for Hugging Face models")
-
-        print(f"Loading Hugging Face model: {model_name}")
 
         # Authenticate with Hugging Face before loading
         _authenticate_huggingface()
+
+        model_name = self.config.get("model_path", "microsoft/DialoGPT-medium")
+        print(f"Loading Hugging Face model: {model_name}")
+
+        # Get device optimization info
+        device_type, device_info = _get_device_optimization()
 
         try:
             # Load tokenizer
@@ -577,19 +785,61 @@ class HuggingFaceModel(BaseModel):
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            # Load model
-            device = self.config.get("device", "auto")
-            torch_dtype = getattr(
-                torch, self.config.get("torch_dtype", "float16"))
+            # Determine device and dtype based on optimization
+            device = "auto"
+            torch_dtype = torch.float16
+
+            if DEVICE_OPTIMIZATION_AVAILABLE:
+                if device_type == DeviceType.NVIDIA_GPU:
+                    device = device_info.get("torch_device", "cuda:0")
+                    torch_dtype = torch.float16 if device_info.get(
+                        "mixed_precision", True) else torch.float32
+                    print(
+                        f"Using NVIDIA GPU optimization: device={device}, dtype={torch_dtype}")
+                elif device_type == DeviceType.APPLE_SILICON:
+                    device = device_info.get("torch_device", "mps") if device_info.get(
+                        "torch_device") == "mps" else "cpu"
+                    torch_dtype = torch.float32  # MPS works better with float32
+                    print(
+                        f"Using Apple Silicon optimization: device={device}, dtype={torch_dtype}")
+                else:
+                    device = "cpu"
+                    torch_dtype = torch.float32
+                    print(
+                        f"Using CPU optimization: device={device}, dtype={torch_dtype}")
+
+            # Load model with optimizations
+            model_kwargs = {
+                "cache_dir": self.config.get("cache_dir", "./hf_cache"),
+                "torch_dtype": torch_dtype,
+                "device_map": device,
+                "trust_remote_code": self.config.get("trust_remote_code", False),
+                "low_cpu_mem_usage": True
+            }
+
+            # Add device-specific optimizations
+            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+                if device_info.get("enable_memory_efficient_attention", True):
+                    try:
+                        model_kwargs["attn_implementation"] = "flash_attention_2"
+                    except:
+                        pass  # Flash attention not available for this model
+                if not device_info.get("gradient_checkpointing", True):
+                    model_kwargs["use_cache"] = True
 
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                cache_dir=self.config.get("cache_dir", "./hf_cache"),
-                torch_dtype=torch_dtype,
-                device_map=device,
-                trust_remote_code=self.config.get("trust_remote_code", False),
-                low_cpu_mem_usage=True
-            )
+                model_name, **model_kwargs)
+
+            # Apply model optimizations
+            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+                if device_info.get("tts_compile", False):
+                    try:
+                        self.model = torch.compile(
+                            self.model, mode="reduce-overhead")
+                        print(
+                            "Applied torch.compile optimization to Hugging Face model")
+                    except Exception as e:
+                        print(f"Warning: Could not apply torch.compile: {e}")
 
             print(
                 f"Hugging Face model loaded successfully on device: {self.model.device}")
@@ -734,24 +984,26 @@ class OpenAIAPIModel(BaseModel):
         self.model = None
 
 
-# Global model instance
-_current_model: Optional[BaseModel] = None
+# Global model cache - support multiple models loaded simultaneously
+_current_model: Optional[BaseModel] = None  # Keep for backward compatibility
+_model_cache: Dict[str, BaseModel] = {}  # New cache for multiple models
 
 
 def create_model(model_type: ModelType, model_config: Dict[str, Any]) -> BaseModel:
     """
-    Create a model instance based on type.
+    Create a model instance of the specified type.
 
     Args:
         model_type: Type of model to create
         model_config: Configuration for the model
 
     Returns:
-        Model instance
+        Model instance (not yet loaded)
 
     Raises:
         ValueError: If model type is not supported
     """
+    # Add type to config for reference
     model_config["type"] = model_type
 
     if model_type == ModelType.GGUF:
@@ -764,13 +1016,155 @@ def create_model(model_type: ModelType, model_config: Dict[str, Any]) -> BaseMod
         raise ValueError(f"Unsupported model type: {model_type}")
 
 
+def _generate_cache_key(model_type: ModelType, model_config: Dict[str, Any]) -> str:
+    """Generate a unique cache key for a model configuration."""
+    if model_type == ModelType.GGUF:
+        return f"gguf:{model_config.get('model_path', '')}"
+    elif model_type == ModelType.HUGGINGFACE:
+        return f"hf:{model_config.get('model_name', '')}"
+    elif model_type == ModelType.OPENAI_API:
+        return f"openai:{model_config.get('model_name', '')}"
+    else:
+        return f"{model_type.value}:{str(model_config)}"
+
+
+def preload_llm_model(
+    model_type: Union[str, ModelType],
+    model_config: Dict[str, Any],
+    cache_key: Optional[str] = None,
+    force_reload: bool = False
+) -> BaseModel:
+    """
+    Preload an LLM model into memory cache for faster inference.
+
+    Args:
+        model_type: Type of model to load
+        model_config: Configuration for the model
+        cache_key: Custom cache key (auto-generated if None)
+        force_reload: Whether to force reload if model already cached
+
+    Returns:
+        Loaded model instance
+
+    Raises:
+        ModelLoadError: If model loading fails
+    """
+    global _model_cache
+
+    if isinstance(model_type, str):
+        model_type = ModelType(model_type.lower())
+
+    # Generate cache key if not provided
+    if cache_key is None:
+        cache_key = _generate_cache_key(model_type, model_config)
+
+    # Return cached model if exists and not forcing reload
+    if not force_reload and cache_key in _model_cache:
+        print(f"Using cached LLM model: {cache_key}")
+        return _model_cache[cache_key]
+
+    # Unload existing model with same cache key
+    if cache_key in _model_cache:
+        print(f"Unloading existing LLM model: {cache_key}")
+        _model_cache[cache_key].unload()
+        del _model_cache[cache_key]
+
+    # Create and load new model
+    print(f"Loading LLM model into cache: {cache_key}")
+    model = create_model(model_type, model_config)
+    model.load()
+
+    # Cache the model
+    _model_cache[cache_key] = model
+    print(f"✓ LLM model cached successfully: {cache_key}")
+
+    return model
+
+
+def get_cached_model(cache_key: str) -> Optional[BaseModel]:
+    """
+    Get a cached model by its cache key.
+
+    Args:
+        cache_key: Cache key for the model
+
+    Returns:
+        Cached model instance or None if not found
+    """
+    return _model_cache.get(cache_key)
+
+
+def unload_cached_model(cache_key: str) -> bool:
+    """
+    Unload a specific cached model.
+
+    Args:
+        cache_key: Cache key for the model to unload
+
+    Returns:
+        True if model was unloaded, False if not found
+    """
+    global _model_cache
+
+    if cache_key in _model_cache:
+        print(f"Unloading cached LLM model: {cache_key}")
+        _model_cache[cache_key].unload()
+        del _model_cache[cache_key]
+        return True
+
+    return False
+
+
+def unload_all_cached_models() -> None:
+    """Unload all cached models and free memory."""
+    global _model_cache
+
+    print("Unloading all cached LLM models...")
+
+    for cache_key, model in _model_cache.items():
+        print(f"Unloading: {cache_key}")
+        model.unload()
+
+    _model_cache.clear()
+
+    # Also unload the legacy current model
+    global _current_model
+    if _current_model is not None:
+        _current_model.unload()
+        _current_model = None
+
+    print("All LLM models unloaded from cache")
+
+
+def get_cached_models_info() -> Dict[str, Dict[str, Any]]:
+    """
+    Get information about all cached models.
+
+    Returns:
+        Dictionary with cache keys and model information
+    """
+    info = {}
+
+    for cache_key, model in _model_cache.items():
+        info[cache_key] = {
+            "model_type": model.model_type.value,
+            "is_loaded": model.is_loaded(),
+            "config": model.config
+        }
+
+    return info
+
+
 def load_model(
     model_type: Union[str, ModelType],
     model_config: Optional[Dict[str, Any]] = None,
     force_reload: bool = False
 ) -> BaseModel:
     """
-    Load a model of specified type.
+    Load a model of specified type (legacy function for backward compatibility).
+
+    This function maintains the old behavior of having a single "current" model
+    while also supporting the new caching system.
 
     Args:
         model_type: Type of model to load
@@ -851,11 +1245,14 @@ def unload_current_model() -> None:
 
 def get_model_info() -> Dict[str, Any]:
     """
-    Get information about the currently loaded model.
+    Get information about the currently loaded model and hardware optimization.
 
     Returns:
         Dictionary containing model information
     """
+    # Get device optimization info
+    device_type, device_info = _get_device_optimization()
+
     info = {
         "model_loaded": _current_model is not None,
         "model_type": _current_model.model_type.value if _current_model else None,
@@ -865,6 +1262,11 @@ def get_model_info() -> Dict[str, Any]:
             "cpu_count": CPU_COUNT,
             "optimal_threads": OPTIMAL_THREADS,
             "is_apple_silicon": IS_APPLE_SILICON
+        },
+        "device_optimization": {
+            "available": DEVICE_OPTIMIZATION_AVAILABLE,
+            "device_type": device_type.value if DEVICE_OPTIMIZATION_AVAILABLE else None,
+            "device_info": device_info if DEVICE_OPTIMIZATION_AVAILABLE else None
         }
     }
 

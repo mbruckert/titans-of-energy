@@ -1,10 +1,10 @@
 from libraries.knowledgebase.preprocess import process_documents_for_collection
 from libraries.knowledgebase.retrieval import query_collection
-from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType
+from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType, preload_llm_model, unload_all_cached_models, get_cached_models_info
 from libraries.llm.preprocess import download_model as download_model_func
 from libraries.stt.transcription import listen_and_transcribe, transcribe_audio_file
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
-from libraries.tts.inference import generate_audio, ensure_model_available
+from libraries.tts.inference import generate_audio, ensure_model_available, preload_models, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
 import psycopg2
@@ -22,6 +22,14 @@ from typing import Dict, Any, Optional
 import sys
 sys.path.append('./libraries')
 
+# Import device optimization utilities
+sys.path.append('./libraries/utils')
+try:
+    from device_optimization import get_device_info, print_device_info, DeviceType
+    DEVICE_OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    print("Warning: Device optimization not available. Using default configurations.")
+    DEVICE_OPTIMIZATION_AVAILABLE = False
 
 load_dotenv()
 
@@ -35,6 +43,51 @@ STORAGE_DIR.mkdir(exist_ok=True)
 # Create subdirectory for generated audio files
 GENERATED_AUDIO_DIR = STORAGE_DIR / "generated_audio"
 GENERATED_AUDIO_DIR.mkdir(exist_ok=True)
+
+# Initialize device optimization on startup
+if DEVICE_OPTIMIZATION_AVAILABLE:
+    print("\n" + "="*60)
+    print("🚀 TITANS API - Hardware Optimization Enabled")
+    print("="*60)
+    device_type, device_info = get_device_info()
+    print_device_info(device_type, device_info)
+
+    # Print optimization summary
+    if device_type == DeviceType.NVIDIA_GPU:
+        print(f"🎯 NVIDIA GPU Optimizations Active:")
+        print(f"   • GPU Memory: {device_info.get('memory_gb', 0):.1f} GB")
+        print(
+            f"   • Compute Capability: {device_info.get('compute_capability', 'unknown')}")
+        print(f"   • TTS Batch Size: {device_info.get('tts_batch_size', 4)}")
+        print(f"   • LLM GPU Layers: {device_info.get('llm_gpu_layers', -1)}")
+        print(
+            f"   • Mixed Precision: {'Enabled' if device_info.get('mixed_precision', True) else 'Disabled'}")
+        print(
+            f"   • Flash Attention: {'Enabled' if device_info.get('llm_use_flash_attention', True) else 'Disabled'}")
+        if device_info.get('is_high_end', False):
+            print(f"   • High-End GPU Features: torch.compile, larger batches")
+    elif device_type == DeviceType.APPLE_SILICON:
+        print(f"🍎 Apple Silicon Optimizations Active:")
+        print(f"   • Chip: {device_info.get('device_name', 'Apple Silicon')}")
+        print(f"   • CPU Cores: {device_info.get('cpu_count', 0)}")
+        print(
+            f"   • MPS Available: {'Yes' if device_info.get('torch_device') == 'mps' else 'No'}")
+        print(
+            f"   • Performance Tier: {'High-End' if device_info.get('is_high_end', False) else ('Pro' if device_info.get('is_pro', False) else 'Standard')}")
+        print(f"   • Optimized for Metal Performance Shaders")
+    else:
+        print(f"💻 CPU Optimizations Active:")
+        print(f"   • Device: {device_info.get('device_name', 'CPU')}")
+        print(f"   • Threads: {device_info.get('llm_threads', 8)}")
+        print(f"   • Conservative settings for stability")
+
+    print("="*60)
+else:
+    print("\n" + "="*60)
+    print("🚀 TITANS API - Standard Configuration")
+    print("="*60)
+    print("⚠️  Hardware optimization not available - using default settings")
+    print("="*60)
 
 # Check for Hugging Face authentication
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
@@ -370,7 +423,7 @@ def get_character(character_id):
 @app.route('/load-character', methods=['POST'])
 def load_character():
     """
-    Preload all models associated with a character.
+    Preload all models associated with a character and unload unused models.
     Expects: {"character_id": int}
     """
     try:
@@ -393,7 +446,59 @@ def load_character():
 
         character_name = character['name']
 
-        # Load LLM model
+        print(f"Loading character: {character_name}")
+        print("Cleaning up unused models...")
+
+        # Get current loaded models info before cleanup
+        from libraries.tts.inference import get_loaded_models
+        from libraries.llm.inference import get_cached_models_info
+
+        current_tts_models = get_loaded_models()
+        current_llm_models = get_cached_models_info()
+
+        print(
+            f"Currently loaded TTS models: {list(current_tts_models.keys())}")
+        print(
+            f"Currently loaded LLM models: {list(current_llm_models.keys())}")
+
+        # Determine what models this character needs
+        needed_tts_model = None
+        needed_llm_cache_key = f"{character_name}_llm"
+
+        if character['voice_cloning_settings']:
+            voice_settings = character['voice_cloning_settings']
+            needed_tts_model = voice_settings.get('model', 'f5tts')
+
+        # Unload TTS models that aren't needed
+        from libraries.tts.inference import unload_models as unload_tts_models
+        if needed_tts_model:
+            # Check if the needed model is already loaded
+            if is_model_loaded(needed_tts_model):
+                print(
+                    f"TTS model {needed_tts_model} already loaded, keeping it")
+            else:
+                # Unload current models and load the needed one
+                if any(current_tts_models.values()):
+                    print(
+                        f"Unloading existing TTS models to load {needed_tts_model}")
+                    unload_tts_models()
+        else:
+            # No TTS needed, unload all TTS models
+            if any(current_tts_models.values()):
+                print("No TTS needed for this character, unloading all TTS models")
+                unload_tts_models()
+
+        # Unload LLM models that aren't needed for this character
+        from libraries.llm.inference import unload_cached_model
+        for cache_key in list(current_llm_models.keys()):
+            if cache_key != needed_llm_cache_key:
+                print(f"Unloading unused LLM model: {cache_key}")
+                unload_cached_model(cache_key)
+                # Also remove from legacy model_cache
+                if cache_key in model_cache:
+                    del model_cache[cache_key]
+
+        # Load LLM model for this character
         if character['llm_model'] and character['llm_config']:
             try:
                 llm_config = character['llm_config']
@@ -406,36 +511,56 @@ def load_character():
                 else:
                     model_type = ModelType.HUGGINGFACE
 
-                model = load_model(model_type, {
-                    'model_path': character['llm_model'],
-                    **llm_config
-                })
+                print(
+                    f"Preloading LLM model '{character['llm_model']}' for {character_name}...")
 
-                model_cache[f"{character_name}_llm"] = model
-                print(f"Loaded LLM model for {character_name}")
+                # Preload the model into cache
+                model = preload_llm_model(
+                    model_type=model_type,
+                    model_config={
+                        'model_path': character['llm_model'],
+                        **llm_config
+                    },
+                    cache_key=needed_llm_cache_key
+                )
+
+                # Keep backward compatibility with existing model_cache
+                model_cache[needed_llm_cache_key] = model
+                print(f"✓ LLM model preloaded and ready for {character_name}")
 
             except Exception as e:
-                print(f"Failed to load LLM model for {character_name}: {e}")
+                print(f"Failed to preload LLM model for {character_name}: {e}")
+                print(f"  Text generation may be slower due to model re-initialization")
 
-        # Ensure TTS model is available
-        if character['voice_cloning_settings']:
+        # Load TTS model for this character
+        if character['voice_cloning_settings'] and needed_tts_model:
             try:
-                voice_settings = character['voice_cloning_settings']
-                tts_model = voice_settings.get('model', 'f5tts')
-
-                print(
-                    f"Preparing TTS model '{tts_model}' for {character_name}...")
-                success = ensure_model_available(tts_model)
-                if success:
-                    # Mark TTS model as ready for this character
-                    model_cache[f"{character_name}_tts_ready"] = True
+                # Only load if not already loaded
+                if not is_model_loaded(needed_tts_model):
                     print(
-                        f"✓ TTS model {tts_model} ready for {character_name}")
+                        f"Preloading TTS model '{needed_tts_model}' for {character_name}...")
+
+                    # First ensure the model is downloaded/available
+                    success = ensure_model_available(needed_tts_model)
+                    if success:
+                        # Use smart preloading to avoid unnecessary reloads
+                        print(
+                            f"Loading TTS model '{needed_tts_model}' into memory...")
+                        preload_models_smart([needed_tts_model])
+
+                        # Mark TTS model as ready for this character
+                        model_cache[f"{character_name}_tts_ready"] = True
+                        print(
+                            f"✓ TTS model {needed_tts_model} preloaded and ready for {character_name}")
+                    else:
+                        print(
+                            f"⚠ Warning: TTS model {needed_tts_model} preparation failed for {character_name}")
+                        print(
+                            f"  Audio generation may be slower due to model re-initialization")
                 else:
                     print(
-                        f"⚠ Warning: TTS model {tts_model} preparation failed for {character_name}")
-                    print(
-                        f"  Audio generation may be slower due to model re-initialization")
+                        f"✓ TTS model {needed_tts_model} already loaded and ready for {character_name}")
+                    model_cache[f"{character_name}_tts_ready"] = True
 
             except Exception as e:
                 print(
@@ -443,9 +568,21 @@ def load_character():
                 print(
                     f"  Character loading will continue, but audio generation may be slower")
 
+        # Get final loaded models info
+        final_tts_models = get_loaded_models()
+        final_llm_models = get_cached_models_info()
+
+        print(f"Final loaded TTS models: {list(final_tts_models.keys())}")
+        print(f"Final loaded LLM models: {list(final_llm_models.keys())}")
+
         return jsonify({
             "message": f"Models loaded for character {character_name}",
             "character_id": character_id,
+            "character_name": character_name,
+            "loaded_models": {
+                "tts": final_tts_models,
+                "llm": final_llm_models
+            },
             "status": "success"
         }), 200
 
@@ -506,7 +643,8 @@ def ask_question_text():
                     style_examples,
                     knowledge_context,
                     character['llm_model'],
-                    character['llm_config']
+                    character['llm_config'],
+                    character_name=character_name
                 )
             except Exception as e:
                 print(f"Text generation failed: {e}")
@@ -645,7 +783,8 @@ def ask_question_audio():
                     style_examples,
                     knowledge_context,
                     character['llm_model'],
-                    character['llm_config']
+                    character['llm_config'],
+                    character_name=character_name
                 )
             except Exception as e:
                 print(f"Text generation failed: {e}")
@@ -768,7 +907,8 @@ def ask_question_audio_live():
                     style_examples,
                     knowledge_context,
                     character['llm_model'],
-                    character['llm_config']
+                    character['llm_config'],
+                    character_name=character_name
                 )
             except Exception as e:
                 print(f"Text generation failed: {e}")
@@ -912,6 +1052,102 @@ def serve_image(filename):
             return jsonify({"error": "Image file not found"}), 404
 
         return send_file(str(file_path), as_attachment=False)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-loaded-models', methods=['GET'])
+def get_loaded_models_endpoint():
+    """
+    Get information about which TTS models are currently loaded in memory.
+    """
+    try:
+        from libraries.tts.inference import get_loaded_models
+        loaded_models = get_loaded_models()
+
+        return jsonify({
+            "loaded_models": loaded_models,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/unload-models', methods=['POST'])
+def unload_models_endpoint():
+    """
+    Unload all TTS models from memory to free up resources.
+    """
+    try:
+        from libraries.tts.inference import unload_models
+        unload_models()
+
+        return jsonify({
+            "message": "All TTS models unloaded from memory",
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-loaded-llm-models', methods=['GET'])
+def get_loaded_llm_models_endpoint():
+    """
+    Get information about which LLM models are currently loaded in memory.
+    """
+    try:
+        from libraries.llm.inference import get_cached_models_info
+        cached_models = get_cached_models_info()
+
+        return jsonify({
+            "cached_models": cached_models,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/unload-llm-models', methods=['POST'])
+def unload_llm_models_endpoint():
+    """
+    Unload all LLM models from memory to free up resources.
+    """
+    try:
+        from libraries.llm.inference import unload_all_cached_models
+        unload_all_cached_models()
+
+        return jsonify({
+            "message": "All LLM models unloaded from memory",
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/unload-all-models', methods=['POST'])
+def unload_all_models_endpoint():
+    """
+    Unload all models (both TTS and LLM) from memory to free up resources.
+    """
+    try:
+        from libraries.tts.inference import unload_models
+        from libraries.llm.inference import unload_all_cached_models
+
+        # Unload TTS models
+        unload_models()
+
+        # Unload LLM models
+        unload_all_cached_models()
+
+        return jsonify({
+            "message": "All models (TTS and LLM) unloaded from memory",
+            "status": "success"
+        }), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

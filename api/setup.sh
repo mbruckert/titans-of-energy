@@ -47,8 +47,38 @@ detect_os() {
     fi
 }
 
+# Function to install sudo if missing
+install_sudo_if_needed() {
+    if ! command_exists sudo; then
+        print_status "sudo not found, installing it first..."
+        local os=$(detect_os)
+        
+        case $os in
+            "linux")
+                if command_exists apt-get; then
+                    apt-get update
+                    apt-get install -y sudo
+                elif command_exists yum; then
+                    yum install -y sudo
+                else
+                    print_error "Cannot install sudo - package manager not detected"
+                    exit 1
+                fi
+                print_success "sudo installed successfully"
+                ;;
+            *)
+                print_error "Cannot install sudo on this system automatically"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
 # Function to install system dependencies
 install_system_dependencies() {
+    # Install sudo first if needed
+    install_sudo_if_needed
+    
     local os=$(detect_os)
     print_status "Installing system dependencies for $os..."
     
@@ -126,14 +156,49 @@ setup_postgresql() {
     
     local os=$(detect_os)
     
+    # Check if we're in a Docker container
+    local in_docker=false
+    if [ -f /.dockerenv ] || grep -q 'docker\|lxc' /proc/1/cgroup 2>/dev/null; then
+        in_docker=true
+        print_status "Detected Docker container environment"
+    fi
+    
     # Start PostgreSQL service
     case $os in
         "linux")
-            if command_exists systemctl; then
+            if [ "$in_docker" = true ]; then
+                print_status "Starting PostgreSQL in Docker container..."
+                # In Docker, we need to initialize and start PostgreSQL manually
+                if [ ! -d "/var/lib/postgresql/data" ] || [ -z "$(ls -A /var/lib/postgresql/data 2>/dev/null)" ]; then
+                    print_status "Initializing PostgreSQL database..."
+                    # Create postgres user if it doesn't exist
+                    if ! id postgres >/dev/null 2>&1; then
+                        useradd -m -s /bin/bash postgres
+                    fi
+                    
+                    # Initialize database
+                    mkdir -p /var/lib/postgresql/data
+                    chown postgres:postgres /var/lib/postgresql/data
+                    chmod 700 /var/lib/postgresql/data
+                    
+                    # Initialize the database cluster
+                    sudo -u postgres /usr/lib/postgresql/*/bin/initdb -D /var/lib/postgresql/data
+                fi
+                
+                # Start PostgreSQL
+                print_status "Starting PostgreSQL server..."
+                sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/logfile start
+                
+                # Wait a moment for PostgreSQL to start
+                sleep 3
+                
+            elif command_exists systemctl; then
                 sudo systemctl start postgresql
                 sudo systemctl enable postgresql
             elif command_exists service; then
                 sudo service postgresql start
+            else
+                print_warning "Could not start PostgreSQL service automatically"
             fi
             ;;
         "macos")
@@ -148,9 +213,23 @@ setup_postgresql() {
         print_status "Checking PostgreSQL connection..."
         
         # Try to connect as postgres user
-        if sudo -u postgres psql -c '\q' 2>/dev/null; then
-            print_success "PostgreSQL is running"
-            
+        local max_attempts=5
+        local attempt=1
+        local connected=false
+        
+        while [ $attempt -le $max_attempts ] && [ "$connected" = false ]; do
+            print_status "Connection attempt $attempt/$max_attempts..."
+            if sudo -u postgres psql -c '\q' 2>/dev/null; then
+                connected=true
+                print_success "PostgreSQL is running"
+            else
+                print_status "Waiting for PostgreSQL to start..."
+                sleep 2
+                attempt=$((attempt + 1))
+            fi
+        done
+        
+        if [ "$connected" = true ]; then
             # Create database and user if they don't exist
             print_status "Setting up database and user..."
             sudo -u postgres psql -c "CREATE DATABASE titans_db;" 2>/dev/null || print_warning "Database titans_db may already exist"
@@ -158,9 +237,18 @@ setup_postgresql() {
             sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE titans_db TO titans_user;" 2>/dev/null
             sudo -u postgres psql -c "ALTER USER titans_user CREATEDB;" 2>/dev/null
             
+            # Create admin superuser and titansdb database
+            print_status "Creating admin superuser..."
+            sudo -u postgres createuser admin --superuser 2>/dev/null || print_warning "User admin may already exist"
+            
+            print_status "Creating titansdb database..."
+            sudo -u postgres psql -c "CREATE DATABASE titansdb;" 2>/dev/null || print_warning "Database titansdb may already exist"
+            
             print_success "Database setup completed"
         else
-            print_warning "Could not connect to PostgreSQL. Please set it up manually."
+            print_warning "Could not connect to PostgreSQL after $max_attempts attempts."
+            print_warning "Please check PostgreSQL installation and try starting it manually:"
+            print_warning "sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl -D /var/lib/postgresql/data start"
         fi
     else
         print_warning "PostgreSQL not found. Please install and configure it manually."
@@ -239,6 +327,9 @@ find_python_executable() {
 
 # Function to install Python 3.10.16 if not available
 install_python_3_10() {
+    # Install sudo first if needed
+    install_sudo_if_needed
+    
     local os=$(detect_os)
     print_status "Installing Python 3.10.16..."
     
