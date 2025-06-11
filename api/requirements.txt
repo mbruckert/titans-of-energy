@@ -1,0 +1,50 @@
+# Core dependencies - install first
+numpy==1.22.0
+scipy
+
+# Core utilities
+python-dotenv==1.1.0
+requests==2.32.3
+uuid
+
+# ChromaDB and vector storage
+chromadb
+
+# OpenAI API
+openai==1.82.1
+
+# Knowledge base preprocessing
+spacy==3.8.7
+keybert==0.9.0
+scikit-learn==1.6.1
+
+# LLM inference and model support
+transformers==4.49.0
+torch==2.7.0
+huggingface-hub==0.32.3
+
+# GGUF model support (optional - may need special installation)
+llama-cpp-python==0.3.9
+
+# Speech-to-Text transcription
+sounddevice==0.5.2
+soundfile==0.13.1
+
+# TTS and audio processing dependencies
+torchaudio==2.7.0
+librosa==0.10.0
+resampy==0.4.3  # Pin to newer version that works better with Python 3.10
+deepfilternet==0.5.6  # For df.enhance audio cleaning (requires Rust)
+tts==0.22.0  # Coqui TTS for XTTS-v2
+f5-tts==1.1.4  # F5-TTS for voice cloning
+# zonos  # Uncomment if using Zonos (may need special installation)
+
+# Development and optional dependencies
+pygame==2.6.1  # For audio playback in transcription examples
+
+# Web framework
+flask==3.1.1
+flask-cors==6.0.0
+psycopg2-binary==2.9.10
+
+openai-whisper

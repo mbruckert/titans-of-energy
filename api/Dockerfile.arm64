@@ -1,0 +1,64 @@
+# Alternative Dockerfile for ARM64 systems
+# This version skips llama-cpp-python to avoid build issues
+FROM python:3.10.16-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set work directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    python3-dev \
+    portaudio19-dev \
+    espeak-ng \
+    libpq-dev \
+    ffmpeg \
+    git \
+    curl \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (required for deepfilternet)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy requirements and create ARM64-compatible version
+COPY requirements.txt .
+
+# Create requirements without llama-cpp-python for ARM64
+RUN grep -v "llama-cpp-python" requirements.txt > requirements_arm64.txt
+
+# Upgrade pip and install core dependencies first
+RUN pip install --upgrade pip
+
+# Install Python dependencies (excluding llama-cpp-python)
+RUN pip install -r requirements_arm64.txt
+
+# Download spaCy model
+RUN python -m spacy download en_core_web_sm
+
+# Copy application code
+COPY . .
+
+# Create necessary directories
+RUN mkdir -p storage/generated_audio models chroma_db
+
+# Create a non-root user for security
+RUN useradd -m -u 1000 titans && chown -R titans:titans /app
+USER titans
+
+# Expose port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:5000/ || exit 1
+
+# Command to run the application
+CMD ["python", "app.py"] 
