@@ -74,7 +74,7 @@ docker-compose ps
 docker-compose logs -f
 ```
 
-## 🎤 Speech-to-Text CLI Usage
+## Speech-to-Text CLI Usage
 
 ### Install CLI Dependencies
 
