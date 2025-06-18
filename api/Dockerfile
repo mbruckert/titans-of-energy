@@ -1,80 +1,52 @@
-# Use Python 3.10 slim image as base
-FROM python:3.10.16-slim
+# Dockerfile
+FROM ubuntu:22.04
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
+# 1) system dependencies
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      curl \
+      ffmpeg \
+      git \
+      python3-pip \
+      python3-dev \
+      libpq-dev \
+      rustc \
+      cargo \
+ && rm -rf /var/lib/apt/lists/*
 
-# Set work directory
+# 2) make sure pip, numpy & scipy are there
+RUN pip3 install --upgrade pip \
+ && pip3 install numpy scipy
+
+# 3) force generic (no-dotprod) builds of llama.cpp
+ENV CFLAGS="-O3 -fPIC" \
+    CXXFLAGS="-O3 -fPIC"
+
+# 4) install the rest of your Python deps
 WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    python3-dev \
-    portaudio19-dev \
-    espeak-ng \
-    libpq-dev \
-    ffmpeg \
-    git \
-    curl \
-    pkg-config \
-    libssl-dev \
-    cmake \
-    ninja-build \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Rust (required for deepfilternet)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Copy requirements first for better caching
 COPY requirements.txt .
+RUN pip3 install -r requirements.txt
 
-# Create a modified requirements.txt for ARM64 compatibility
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-    # For ARM64, we'll skip llama-cpp-python initially and install it separately with specific flags
-    grep -v "llama-cpp-python" requirements.txt > requirements_no_llama.txt; \
-    else \
-    cp requirements.txt requirements_no_llama.txt; \
-    fi
+# 5) spaCy model (so spacy.load("en_core_web_sm") works)
+RUN python3 -m spacy download en_core_web_sm
 
-# Upgrade pip and install core dependencies first
-RUN pip install --upgrade pip
-
-# Install remaining Python dependencies (excluding llama-cpp-python for ARM64)
-RUN pip install -r requirements_no_llama.txt
-
-# Install llama-cpp-python with ARM64-specific configuration if needed
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-    # For ARM64, install with specific CMAKE flags to avoid NEON issues
-    CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_CPU_HBM=OFF -DGGML_CPU_ALL_VARIANTS=OFF" \
-    pip install llama-cpp-python==0.3.9 --no-cache-dir --force-reinstall; \
-    else \
-    # For x86_64, install normally
-    pip install llama-cpp-python==0.3.9; \
-    fi
-
-# Download spaCy model
-RUN python -m spacy download en_core_web_sm
-
-# Copy application code
+# 6) copy your code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p storage/generated_audio models chroma_db
+# 7) create directories for persistent volumes
+RUN mkdir -p /app/chroma_db /app/storage /app/outputs \
+ && chmod 755 /app/chroma_db /app/storage /app/outputs
 
-# Create a non-root user for security
-RUN useradd -m -u 1000 titans && chown -R titans:titans /app
-USER titans
+# 8) default Postgres connection settings (compose will override USER/PASSWORD/DB if you like)
+ENV PGHOST=db \
+    PGPORT=5432 \
+    PGUSER=myuser \
+    PGPASSWORD=mypassword \
+    PGDATABASE=mydb
 
-# Expose port
 EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:5000/ || exit 1
-
-# Command to run the application
-CMD ["python", "app.py"]
+# 9) launch your app
+CMD ["python3", "app.py"]

@@ -2,11 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import CharacterCard from '../components/CharacterCard';
 import AddCharacterModal from '../components/AddCharacterModal';
+import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
 
 interface Character {
   id: number;
   name: string;
-  image_path?: string;
+  image_base64?: string;
+  llm_model?: string;
+  created_at?: string;
 }
 
 function CharacterSelection() {
@@ -22,12 +25,18 @@ function CharacterSelection() {
 
   const fetchCharacters = async () => {
     try {
-      const response = await fetch('http://localhost:5000/characters');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHARACTERS}`);
       if (!response.ok) {
         throw new Error('Failed to fetch characters');
       }
       const data = await response.json();
-      setCharacters(data);
+      
+      // Handle the API response structure
+      if (data.status === 'success' && data.characters) {
+        setCharacters(data.characters);
+      } else {
+        throw new Error(data.error || 'Failed to fetch characters');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -40,20 +49,32 @@ function CharacterSelection() {
   };
 
   const handleSubmitCharacter = (name: string, imageFile: File) => {
-    const imageUrl = URL.createObjectURL(imageFile);
+    // Initialize global file storage if it doesn't exist
+    if (!window.characterCreationFiles) {
+      window.characterCreationFiles = {};
+    }
     
-    setCharacters([...characters, {
-      id: characters.length + 1, // Temporary ID until backend integration
-      name,
-      image_path: imageUrl
-    }]);
+    // Store the image file in global storage
+    window.characterCreationFiles.imageFile = imageFile;
+    
+    // Store character data in session storage (without File objects)
+    sessionStorage.setItem('newCharacterData', JSON.stringify({
+      name
+    }));
+    
+    console.log('Character image stored for creation:', imageFile.name);
     
     setIsModalOpen(false);
     navigate('/model-selection');
   };
 
   const handleCharacterClick = (character: Character) => {
-    navigate('/chatbot', { state: { characterName: character.name } });
+    navigate('/chatbot', { 
+      state: { 
+        characterId: character.id,
+        characterName: character.name 
+      } 
+    });
   };
 
   if (isLoading) {
@@ -71,6 +92,12 @@ function CharacterSelection() {
       <div className="container mx-auto p-4">
         <div className="flex justify-center items-center h-64">
           <p className="text-xl text-red-600">Error: {error}</p>
+          <button 
+            onClick={fetchCharacters}
+            className="ml-4 px-4 py-2 bg-black text-white rounded hover:bg-gray-800"
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
@@ -84,7 +111,7 @@ function CharacterSelection() {
           <CharacterCard
             key={character.id}
             name={character.name}
-            image={character.image_path || '/public/images/default-character.jpg'}
+            image={character.image_base64 || '/public/images/default-character.jpg'}
             onClick={() => handleCharacterClick(character)}
           />
         ))}

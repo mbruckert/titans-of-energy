@@ -15,7 +15,6 @@ const UploadProgress: React.FC<UploadProgressProps> = ({ currentStep }) => {
     { label: 'Knowledge Base', isActive: currentStep === 2 },
     { label: 'Voice Cloning', isActive: currentStep === 3 },
     { label: 'Style Tuning', isActive: currentStep === 4 },
-    { label: 'TTS Config', isActive: currentStep === 5 }
   ];
 
   return (

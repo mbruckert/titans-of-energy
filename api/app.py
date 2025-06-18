@@ -2,7 +2,6 @@ from libraries.knowledgebase.preprocess import process_documents_for_collection
 from libraries.knowledgebase.retrieval import query_collection
 from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType, preload_llm_model, unload_all_cached_models, get_cached_models_info
 from libraries.llm.preprocess import download_model as download_model_func
-from libraries.stt.transcription import listen_and_transcribe, transcribe_audio_file
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
 from libraries.tts.inference import generate_audio, ensure_model_available, preload_models, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
 from flask import Flask, request, jsonify, send_file, url_for
@@ -147,6 +146,44 @@ def get_file_url(file_path: str, file_type: str) -> Optional[str]:
     return None
 
 
+def get_image_base64(file_path: str) -> Optional[str]:
+    """
+    Convert an image file to base64 string.
+    Returns None if file_path is None or file doesn't exist.
+    """
+    if not file_path or not os.path.exists(file_path):
+        print(f"get_image_base64: File not found or path is None: {file_path}")
+        return None
+
+    try:
+        import base64
+        with open(file_path, 'rb') as image_file:
+            # Read the image file
+            image_data = image_file.read()
+            # Encode to base64
+            base64_string = base64.b64encode(image_data).decode('utf-8')
+
+            # Determine MIME type based on file extension
+            file_extension = Path(file_path).suffix.lower()
+            if file_extension in ['.jpg', '.jpeg']:
+                mime_type = 'image/jpeg'
+            elif file_extension == '.png':
+                mime_type = 'image/png'
+            elif file_extension == '.gif':
+                mime_type = 'image/gif'
+            elif file_extension == '.webp':
+                mime_type = 'image/webp'
+            else:
+                mime_type = 'image/jpeg'  # Default fallback
+
+            # Return as data URL
+            return f"data:{mime_type};base64,{base64_string}"
+
+    except Exception as e:
+        print(f"get_image_base64: Error converting image to base64: {e}")
+        return None
+
+
 def init_db():
     """Initialize database tables"""
     conn = get_db_connection()
@@ -165,9 +202,21 @@ def init_db():
             voice_cloning_reference_text TEXT,
             voice_cloning_settings JSONB,
             style_tuning_data_path VARCHAR(500),
-            stt_settings JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Create chat_history table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id SERIAL PRIMARY KEY,
+            character_id INTEGER REFERENCES characters(id) ON DELETE CASCADE,
+            user_message TEXT NOT NULL,
+            bot_response TEXT NOT NULL,
+            audio_base64 TEXT,
+            knowledge_context TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -208,7 +257,6 @@ def create_character():
         llm_config = json.loads(request.form.get('llm_config', '{}'))
         voice_cloning_settings = json.loads(
             request.form.get('voice_cloning_settings', '{}'))
-        stt_settings = json.loads(request.form.get('stt_settings', '{}'))
 
         # Extract reference text from voice cloning settings
         voice_reference_text = voice_cloning_settings.get('reference_text', '')
@@ -333,15 +381,15 @@ def create_character():
         cur.execute("""
             INSERT INTO characters 
             (name, image_path, llm_model, llm_config, knowledge_base_path, 
-             voice_cloning_audio_path, voice_cloning_reference_text, voice_cloning_settings, style_tuning_data_path, stt_settings)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+             voice_cloning_audio_path, voice_cloning_reference_text, voice_cloning_settings, style_tuning_data_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) 
             RETURNING id
         """, (
             name, image_path, llm_model, json.dumps(
                 llm_config), knowledge_base_path,
             voice_cloning_audio_path, voice_reference_text,
             json.dumps(voice_cloning_settings),
-            style_tuning_data_path, json.dumps(stt_settings)
+            style_tuning_data_path
         ))
 
         character_id = cur.fetchone()[0]
@@ -374,13 +422,13 @@ def get_characters():
         cur.close()
         conn.close()
 
-        # Convert to JSON serializable format and add image URLs
+        # Convert to JSON serializable format and add image base64
         result = []
         for char in characters:
             char_dict = dict(char)
-            # Convert image path to URL
-            char_dict['image_url'] = get_file_url(
-                char_dict['image_path'], 'image')
+            # Convert image path to base64
+            char_dict['image_base64'] = get_image_base64(
+                char_dict['image_path'])
             # Remove the raw file path for security
             char_dict.pop('image_path', None)
             result.append(char_dict)
@@ -405,9 +453,9 @@ def get_character(character_id):
         if not character:
             return jsonify({"error": "Character not found"}), 404
 
-        # Convert to dict and add image URL
+        # Convert to dict and add image base64
         char_dict = dict(character)
-        char_dict['image_url'] = get_file_url(char_dict['image_path'], 'image')
+        char_dict['image_base64'] = get_image_base64(char_dict['image_path'])
         # Remove sensitive file paths for security
         char_dict.pop('image_path', None)
         char_dict.pop('knowledge_base_path', None)
@@ -569,22 +617,48 @@ def load_character():
                     f"  Character loading will continue, but audio generation may be slower")
 
         # Get final loaded models info
-        final_tts_models = get_loaded_models()
-        final_llm_models = get_cached_models_info()
+        try:
+            final_tts_models = get_loaded_models()
+            final_llm_models = get_cached_models_info()
 
-        print(f"Final loaded TTS models: {list(final_tts_models.keys())}")
-        print(f"Final loaded LLM models: {list(final_llm_models.keys())}")
+            print(f"Final loaded TTS models: {list(final_tts_models.keys())}")
+            print(f"Final loaded LLM models: {list(final_llm_models.keys())}")
 
-        return jsonify({
-            "message": f"Models loaded for character {character_name}",
-            "character_id": character_id,
-            "character_name": character_name,
-            "loaded_models": {
-                "tts": final_tts_models,
-                "llm": final_llm_models
-            },
-            "status": "success"
-        }), 200
+            # Convert model info to JSON-serializable format
+            tts_models_serializable = {}
+            for key, value in final_tts_models.items():
+                if value is not None:
+                    tts_models_serializable[key] = str(type(value).__name__)
+                else:
+                    tts_models_serializable[key] = None
+
+            llm_models_serializable = {}
+            for key, value in final_llm_models.items():
+                if value is not None:
+                    llm_models_serializable[key] = str(type(value).__name__)
+                else:
+                    llm_models_serializable[key] = None
+
+            return jsonify({
+                "message": f"Models loaded for character {character_name}",
+                "character_id": character_id,
+                "character_name": character_name,
+                "loaded_models": {
+                    "tts": tts_models_serializable,
+                    "llm": llm_models_serializable
+                },
+                "status": "success"
+            }), 200
+
+        except Exception as model_info_error:
+            print(f"Error getting model info: {model_info_error}")
+            # Return success without detailed model info
+            return jsonify({
+                "message": f"Models loaded for character {character_name}",
+                "character_id": character_id,
+                "character_name": character_name,
+                "status": "success"
+            }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -593,7 +667,7 @@ def load_character():
 @app.route('/ask-question-text', methods=['POST'])
 def ask_question_text():
     """
-    Process text question and return styled text response with generated audio.
+    Process text question and return styled text response with generated audio as base64.
     Expects: {"character_id": int, "question": str}
     """
     try:
@@ -609,10 +683,10 @@ def ask_question_text():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
         character = cur.fetchone()
-        cur.close()
-        conn.close()
 
         if not character:
+            cur.close()
+            conn.close()
             return jsonify({"error": "Character not found"}), 404
 
         character_name = character['name']
@@ -650,10 +724,12 @@ def ask_question_text():
                 print(f"Text generation failed: {e}")
                 styled_response = "I'm sorry, I'm having trouble generating a response right now."
 
-        # Generate audio response
-        audio_path = None
+        # Generate audio response as base64
+        audio_base64 = None
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
+                from libraries.tts.inference import generate_cloned_audio_base64
+
                 voice_settings = character['voice_cloning_settings']
                 tts_model = voice_settings.get('model', 'f5tts')
 
@@ -665,295 +741,43 @@ def ask_question_text():
                     print(
                         "Warning: No reference text found for character, using fallback")
 
-                # Check if TTS model is already prepared for this character
-                tts_ready = model_cache.get(
-                    f"{character_name}_tts_ready", False)
-
-                # Set output directory to be within storage so files can be served
-                voice_settings_copy = voice_settings.copy()
-                voice_settings_copy['output_dir'] = str(
-                    STORAGE_DIR / "generated_audio")
-
-                audio_path = generate_audio(
+                # Generate audio as base64
+                audio_base64 = generate_cloned_audio_base64(
                     model=tts_model,
                     ref_audio=character['voice_cloning_audio_path'],
                     ref_text=ref_text,
                     gen_text=styled_response,
-                    config=voice_settings_copy,
-                    auto_download=not tts_ready  # Skip download if already prepared
+                    config=voice_settings
                 )
 
             except Exception as e:
                 print(f"Audio generation failed: {e}")
+                audio_base64 = None
+
+        # Store chat history in database
+        try:
+            cur.execute("""
+                INSERT INTO chat_history 
+                (character_id, user_message, bot_response, audio_base64, knowledge_context)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                character_id,
+                question,
+                styled_response,
+                audio_base64,
+                knowledge_context
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"Failed to store chat history: {e}")
+
+        cur.close()
+        conn.close()
 
         return jsonify({
             "question": question,
             "text_response": styled_response,
-            "audio_url": get_file_url(audio_path, 'audio'),
-            "knowledge_context": knowledge_context,
-            "character_name": character_name,
-            "status": "success"
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/ask-question-audio', methods=['POST'])
-def ask_question_audio():
-    """
-    Process pre-recorded audio file and return styled text response with generated audio.
-    Expects form data with 'character_id' and 'audio_file'
-    """
-    try:
-        character_id = request.form.get('character_id')
-
-        if not character_id:
-            return jsonify({"error": "character_id is required"}), 400
-
-        if 'audio_file' not in request.files:
-            return jsonify({"error": "audio_file is required"}), 400
-
-        audio_file = request.files['audio_file']
-        if not audio_file.filename:
-            return jsonify({"error": "No audio file provided"}), 400
-
-        # Get character data
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
-        character = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not character:
-            return jsonify({"error": "Character not found"}), 404
-
-        character_name = character['name']
-
-        # Save uploaded audio temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
-            audio_file.save(tmp_file.name)
-            temp_audio_path = tmp_file.name
-
-        # Transcribe audio to text
-        question = ""
-        try:
-            stt_settings = character.get('stt_settings', {})
-            stt_model = stt_settings.get('model', 'whisper')
-
-            question = transcribe_audio_file(
-                temp_audio_path, stt_model, stt_settings)
-
-        except Exception as e:
-            print(f"Speech transcription failed: {e}")
-            return jsonify({"error": "Failed to transcribe audio"}), 500
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_audio_path):
-                os.unlink(temp_audio_path)
-
-        if not question.strip():
-            return jsonify({"error": "No speech detected in audio"}), 400
-
-        # Now process like text question
-        # Search knowledge base
-        knowledge_context = ""
-        try:
-            kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-            knowledge_context = query_collection(
-                kb_collection, question, n_results=3)
-        except Exception as e:
-            print(f"Knowledge base search failed: {e}")
-
-        # Get style examples
-        style_examples = []
-        try:
-            style_examples = get_style_data(
-                question, character_name, num_examples=2)
-        except Exception as e:
-            print(f"Style data retrieval failed: {e}")
-
-        # Generate styled text response
-        styled_response = ""
-        if character['llm_model'] and character['llm_config']:
-            try:
-                styled_response = generate_styled_text(
-                    question,
-                    style_examples,
-                    knowledge_context,
-                    character['llm_model'],
-                    character['llm_config'],
-                    character_name=character_name
-                )
-            except Exception as e:
-                print(f"Text generation failed: {e}")
-                styled_response = "I'm sorry, I'm having trouble generating a response right now."
-
-        # Generate audio response
-        audio_path = None
-        if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
-            try:
-                voice_settings = character['voice_cloning_settings']
-                tts_model = voice_settings.get('model', 'f5tts')
-
-                # Use the stored reference text from the character
-                ref_text = character.get('voice_cloning_reference_text', '')
-                if not ref_text:
-                    # Fallback if no reference text was stored
-                    ref_text = "Hello, how can I help you?"
-                    print(
-                        "Warning: No reference text found for character, using fallback")
-
-                # Check if TTS model is already prepared for this character
-                tts_ready = model_cache.get(
-                    f"{character_name}_tts_ready", False)
-
-                # Set output directory to be within storage so files can be served
-                voice_settings_copy = voice_settings.copy()
-                voice_settings_copy['output_dir'] = str(
-                    STORAGE_DIR / "generated_audio")
-
-                audio_path = generate_audio(
-                    model=tts_model,
-                    ref_audio=character['voice_cloning_audio_path'],
-                    ref_text=ref_text,
-                    gen_text=styled_response,
-                    config=voice_settings_copy,
-                    auto_download=not tts_ready  # Skip download if already prepared
-                )
-
-            except Exception as e:
-                print(f"Audio generation failed: {e}")
-
-        return jsonify({
-            "transcribed_question": question,
-            "text_response": styled_response,
-            "audio_url": get_file_url(audio_path, 'audio'),
-            "knowledge_context": knowledge_context,
-            "character_name": character_name,
-            "status": "success"
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/ask-question-audio-live', methods=['POST'])
-def ask_question_audio_live():
-    """
-    Process audio question with live recording and return styled text response with generated audio.
-    Expects JSON data with 'character_id'
-    """
-    try:
-        data = request.get_json()
-        character_id = data.get('character_id')
-
-        if not character_id:
-            return jsonify({"error": "character_id is required"}), 400
-
-        # Get character data
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
-        character = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not character:
-            return jsonify({"error": "Character not found"}), 404
-
-        character_name = character['name']
-
-        # Transcribe audio to text using live recording
-        question = ""
-        try:
-            stt_settings = character.get('stt_settings', {})
-            stt_model = stt_settings.get('model', 'whisper')
-
-            question = listen_and_transcribe(stt_model, stt_settings)
-
-        except Exception as e:
-            print(f"Speech transcription failed: {e}")
-            return jsonify({"error": "Failed to transcribe audio"}), 500
-
-        if not question.strip():
-            return jsonify({"error": "No speech detected in audio"}), 400
-
-        # Now process like text question
-        # Search knowledge base
-        knowledge_context = ""
-        try:
-            kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-            knowledge_context = query_collection(
-                kb_collection, question, n_results=3)
-        except Exception as e:
-            print(f"Knowledge base search failed: {e}")
-
-        # Get style examples
-        style_examples = []
-        try:
-            style_examples = get_style_data(
-                question, character_name, num_examples=2)
-        except Exception as e:
-            print(f"Style data retrieval failed: {e}")
-
-        # Generate styled text response
-        styled_response = ""
-        if character['llm_model'] and character['llm_config']:
-            try:
-                styled_response = generate_styled_text(
-                    question,
-                    style_examples,
-                    knowledge_context,
-                    character['llm_model'],
-                    character['llm_config'],
-                    character_name=character_name
-                )
-            except Exception as e:
-                print(f"Text generation failed: {e}")
-                styled_response = "I'm sorry, I'm having trouble generating a response right now."
-
-        # Generate audio response
-        audio_path = None
-        if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
-            try:
-                voice_settings = character['voice_cloning_settings']
-                tts_model = voice_settings.get('model', 'f5tts')
-
-                # Use the stored reference text from the character
-                ref_text = character.get('voice_cloning_reference_text', '')
-                if not ref_text:
-                    # Fallback if no reference text was stored
-                    ref_text = "Hello, how can I help you?"
-                    print(
-                        "Warning: No reference text found for character, using fallback")
-
-                # Check if TTS model is already prepared for this character
-                tts_ready = model_cache.get(
-                    f"{character_name}_tts_ready", False)
-
-                # Set output directory to be within storage so files can be served
-                voice_settings_copy = voice_settings.copy()
-                voice_settings_copy['output_dir'] = str(
-                    STORAGE_DIR / "generated_audio")
-
-                audio_path = generate_audio(
-                    model=tts_model,
-                    ref_audio=character['voice_cloning_audio_path'],
-                    ref_text=ref_text,
-                    gen_text=styled_response,
-                    config=voice_settings_copy,
-                    auto_download=not tts_ready  # Skip download if already prepared
-                )
-
-            except Exception as e:
-                print(f"Audio generation failed: {e}")
-
-        return jsonify({
-            "transcribed_question": question,
-            "text_response": styled_response,
-            "audio_url": get_file_url(audio_path, 'audio'),
+            "audio_base64": audio_base64,
             "knowledge_context": knowledge_context,
             "character_name": character_name,
             "status": "success"
@@ -1145,6 +969,100 @@ def unload_all_models_endpoint():
 
         return jsonify({
             "message": "All models (TTS and LLM) unloaded from memory",
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-chat-history/<int:character_id>', methods=['GET'])
+def get_chat_history(character_id):
+    """
+    Get chat history for a specific character.
+    Optional query parameters: limit (default 50), offset (default 0)
+    """
+    try:
+        # Get query parameters
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        # Validate limit
+        if limit > 100:
+            limit = 100
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Check if character exists
+        cur.execute("SELECT name FROM characters WHERE id = %s",
+                    (character_id,))
+        character = cur.fetchone()
+        if not character:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Character not found"}), 404
+
+        # Get chat history
+        cur.execute("""
+            SELECT id, user_message, bot_response, audio_base64, knowledge_context, created_at
+            FROM chat_history 
+            WHERE character_id = %s 
+            ORDER BY created_at DESC 
+            LIMIT %s OFFSET %s
+        """, (character_id, limit, offset))
+
+        history = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        # Convert to JSON serializable format
+        result = []
+        for entry in history:
+            entry_dict = dict(entry)
+            # Convert datetime to string
+            entry_dict['created_at'] = entry_dict['created_at'].isoformat()
+            result.append(entry_dict)
+
+        return jsonify({
+            "character_id": character_id,
+            "character_name": character['name'],
+            "chat_history": result,
+            "total_messages": len(result),
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/clear-chat-history/<int:character_id>', methods=['DELETE'])
+def clear_chat_history(character_id):
+    """Clear all chat history for a specific character."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Check if character exists
+        cur.execute("SELECT name FROM characters WHERE id = %s",
+                    (character_id,))
+        character = cur.fetchone()
+        if not character:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Character not found"}), 404
+
+        # Delete chat history
+        cur.execute(
+            "DELETE FROM chat_history WHERE character_id = %s", (character_id,))
+        deleted_count = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": f"Cleared {deleted_count} messages from chat history",
+            "character_id": character_id,
             "status": "success"
         }), 200
 

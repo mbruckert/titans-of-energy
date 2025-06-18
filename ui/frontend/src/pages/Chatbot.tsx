@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useVoiceToText } from "react-speakup";
-import { Mic, MicOff } from "lucide-react";
+import { Mic, MicOff, Volume2, VolumeX, Play, Pause, Trash2 } from "lucide-react";
+import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
 
 interface Message {
     text: string;
     isUser: boolean;
     timestamp: Date;
+    audioBase64?: string;
+    id?: number;
 }
 
 const Chatbot = () => {
@@ -15,14 +18,119 @@ const Chatbot = () => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputMessage, setInputMessage] = useState("");
     const [isListening, setIsListening] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [currentAudio, setCurrentAudio] = useState<HTMLAudioElement | null>(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
+    const [autoPlayAudio, setAutoPlayAudio] = useState(true);
 
-    // Get character name from location state
+    // Get character data from location state
+    const characterId = location.state?.characterId;
     const characterName = location.state?.characterName || "Character";
 
-    const handleSendMessage = (e: React.FormEvent) => {
+    useEffect(() => {
+        if (characterId) {
+            loadCharacterModels();
+            loadChatHistory();
+        }
+    }, [characterId]);
+
+    // Cleanup audio when component unmounts
+    useEffect(() => {
+        return () => {
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+            }
+        };
+    }, [currentAudio]);
+
+    const loadCharacterModels = async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOAD_CHARACTER}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ character_id: characterId }),
+            });
+
+            if (!response.ok) {
+                console.warn('Failed to preload character models');
+            } else {
+                console.log('Character models loaded successfully');
+            }
+        } catch (err) {
+            console.warn('Error loading character models:', err);
+        }
+    };
+
+    const loadChatHistory = async () => {
+        try {
+            setIsLoadingHistory(true);
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHAT_HISTORY}/${characterId}?limit=20`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.status === 'success' && data.chat_history) {
+                    // Convert chat history to message format
+                    const historyMessages: Message[] = [];
+                    data.chat_history.reverse().forEach((entry: any) => {
+                        // Add user message
+                        historyMessages.push({
+                            text: entry.user_message,
+                            isUser: true,
+                            timestamp: new Date(entry.created_at),
+                            id: entry.id
+                        });
+                        // Add bot response
+                        historyMessages.push({
+                            text: entry.bot_response,
+                            isUser: false,
+                            timestamp: new Date(entry.created_at),
+                            audioBase64: entry.audio_base64,
+                            id: entry.id
+                        });
+                    });
+                    setMessages(historyMessages);
+                }
+            }
+        } catch (err) {
+            console.warn('Failed to load chat history:', err);
+        } finally {
+            setIsLoadingHistory(false);
+        }
+    };
+
+    const clearChatHistory = async () => {
+        if (!confirm('Are you sure you want to clear all chat history?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.CLEAR_CHAT_HISTORY}/${characterId}`, {
+                method: 'DELETE',
+            });
+
+            if (response.ok) {
+                setMessages([]);
+                console.log('Chat history cleared');
+            } else {
+                setError('Failed to clear chat history');
+            }
+        } catch (err) {
+            setError('Error clearing chat history');
+        }
+    };
+
+    const handleSendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!inputMessage.trim()) return;
+        if (!inputMessage.trim() || isLoading) return;
+
+        // Stop any currently playing audio
+        stopCurrentAudio();
 
         // Add user message
         const userMessage: Message = {
@@ -30,18 +138,167 @@ const Chatbot = () => {
             isUser: true,
             timestamp: new Date(),
         };
-        setMessages([...messages, userMessage]);
+        setMessages(prev => [...prev, userMessage]);
+        const currentInput = inputMessage;
         setInputMessage("");
+        setIsLoading(true);
+        setError(null);
 
-        // Simulate bot response (replace with actual API call later)
-        setTimeout(() => {
-            const botMessage: Message = {
-                text: `Placeholder response from ${characterName}.`,
+        try {
+            // Call the API
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ASK_QUESTION_TEXT}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    character_id: characterId,
+                    question: currentInput,
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get response from character');
+            }
+
+            const data = await response.json();
+
+            if (data.status === 'success') {
+                // Add bot message
+                const botMessage: Message = {
+                    text: data.text_response,
+                    isUser: false,
+                    timestamp: new Date(),
+                    audioBase64: data.audio_base64,
+                };
+                
+                // Debug logging for audio issues
+                if (!data.audio_base64) {
+                    console.warn('No audio base64 received from API. Character may not have voice cloning configured.');
+                    console.log('API Response:', data);
+                }
+                
+                setMessages(prev => {
+                    const newMessages = [...prev, botMessage];
+                    // Auto-play audio if enabled and audio is available
+                    if (autoPlayAudio && data.audio_base64) {
+                        // Use setTimeout to ensure the message is rendered first
+                        setTimeout(() => {
+                            playAudioFromBase64(data.audio_base64, newMessages.length - 1);
+                        }, 100);
+                    }
+                    return newMessages;
+                });
+            } else {
+                throw new Error(data.error || 'Failed to get response');
+            }
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'An error occurred');
+            // Add error message
+            const errorMessage: Message = {
+                text: "Sorry, I'm having trouble responding right now. Please try again.",
                 isUser: false,
                 timestamp: new Date(),
             };
-            setMessages((prev) => [...prev, botMessage]);
-        }, 1000);
+            setMessages(prev => [...prev, errorMessage]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const stopCurrentAudio = () => {
+        if (currentAudio) {
+            currentAudio.pause();
+            currentAudio.currentTime = 0;
+            setCurrentAudio(null);
+            setIsPlaying(false);
+            setPlayingMessageIndex(null);
+        }
+    };
+
+    const base64ToAudioData = (base64String: string): Uint8Array | null => {
+        try {
+            // Remove data URL prefix if present
+            if (base64String.includes(',')) {
+                base64String = base64String.split(',')[1];
+            }
+
+            // Decode base64 to bytes
+            const binaryString = atob(base64String);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes;
+        } catch (error) {
+            console.error('Error converting base64 to audio:', error);
+            return null;
+        }
+    };
+
+    const playAudioFromBase64 = (base64Audio: string, messageIndex?: number) => {
+        try {
+            // Stop current audio if playing
+            stopCurrentAudio();
+
+            // Convert base64 to audio data
+            const audioData = base64ToAudioData(base64Audio);
+            if (!audioData) {
+                setError('Failed to decode audio data');
+                return;
+            }
+
+            // Create blob and object URL
+            const audioBlob = new Blob([audioData], { type: 'audio/wav' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            const audio = new Audio(audioUrl);
+            setCurrentAudio(audio);
+            setIsPlaying(true);
+            if (messageIndex !== undefined) {
+                setPlayingMessageIndex(messageIndex);
+            }
+            
+            audio.play().catch(err => {
+                console.warn('Failed to play audio:', err);
+                setError('Failed to play audio. Please check your audio settings.');
+                setIsPlaying(false);
+                setPlayingMessageIndex(null);
+            });
+
+            audio.onended = () => {
+                setCurrentAudio(null);
+                setIsPlaying(false);
+                setPlayingMessageIndex(null);
+                // Clean up object URL
+                URL.revokeObjectURL(audioUrl);
+            };
+
+            audio.onerror = () => {
+                console.warn('Audio playback error');
+                setError('Audio playback failed. The audio data may be corrupted.');
+                setIsPlaying(false);
+                setPlayingMessageIndex(null);
+                // Clean up object URL
+                URL.revokeObjectURL(audioUrl);
+            };
+        } catch (err) {
+            console.warn('Error playing audio:', err);
+            setError('Error playing audio.');
+        }
+    };
+
+    const toggleAudioPlayback = (audioBase64: string, messageIndex: number) => {
+        if (isPlaying && playingMessageIndex === messageIndex) {
+            // Pause current audio
+            if (currentAudio) {
+                currentAudio.pause();
+                setIsPlaying(false);
+            }
+        } else {
+            // Play audio
+            playAudioFromBase64(audioBase64, messageIndex);
+        }
     };
 
     const { startListening, stopListening, transcript } = useVoiceToText({
@@ -75,6 +332,25 @@ const Chatbot = () => {
         }
     };
 
+    // Redirect if no character selected
+    if (!characterId) {
+        return (
+            <div className="flex flex-col h-screen bg-gray-50">
+                <div className="flex-1 flex items-center justify-center">
+                    <div className="text-center">
+                        <p className="text-xl text-gray-600 mb-4">No character selected</p>
+                        <button
+                            onClick={() => navigate("/character-selection")}
+                            className="bg-black text-white px-6 py-2 rounded-lg hover:bg-gray-800"
+                        >
+                            Select Character
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="flex flex-col h-screen bg-gray-50">
             {/* Header */}
@@ -85,44 +361,121 @@ const Chatbot = () => {
                 >
                     ← Back
                 </button>
-                <h1 className="text-xl font-semibold">
+                <h1 className="text-xl font-semibold flex-1">
                     Talk to {characterName}
                 </h1>
+                
+                {/* Audio Controls */}
+                <div className="flex items-center space-x-2">
+                    <button
+                        onClick={clearChatHistory}
+                        className="p-2 rounded-full bg-gray-100 text-gray-600 hover:bg-red-100 hover:text-red-600"
+                        title="Clear chat history"
+                    >
+                        <Trash2 size={20} />
+                    </button>
+                    
+                    <button
+                        onClick={() => setAutoPlayAudio(!autoPlayAudio)}
+                        className={`p-2 rounded-full ${
+                            autoPlayAudio 
+                                ? "bg-green-100 text-green-600" 
+                                : "bg-gray-100 text-gray-600"
+                        }`}
+                        title={autoPlayAudio ? "Auto-play enabled" : "Auto-play disabled"}
+                    >
+                        {autoPlayAudio ? <Volume2 size={20} /> : <VolumeX size={20} />}
+                    </button>
+                    
+                    {(isLoading || isLoadingHistory) && (
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-black"></div>
+                    )}
+                </div>
             </div>
 
             {/* Error message */}
             {error && (
                 <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-2 text-sm">
                     {error}
+                    <button 
+                        onClick={() => setError(null)}
+                        className="ml-2 text-red-800 hover:text-red-900"
+                    >
+                        ×
+                    </button>
                 </div>
             )}
 
             {/* Chat messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {messages.map((message, index) => (
-                    <div
-                        key={index}
-                        className={`flex ${
-                            message.isUser ? "justify-end" : "justify-start"
-                        }`}
-                    >
+                {isLoadingHistory ? (
+                    <div className="text-center text-gray-500 mt-8">
+                        <p>Loading chat history...</p>
+                    </div>
+                ) : messages.length === 0 ? (
+                    <div className="text-center text-gray-500 mt-8">
+                        <p>Start a conversation with {characterName}!</p>
+                        <p className="text-sm mt-2">
+                            {autoPlayAudio ? "🔊 Audio responses will play automatically" : "🔇 Click the play button to hear responses"}
+                        </p>
+                    </div>
+                ) : (
+                    messages.map((message, index) => (
                         <div
-                            className={`max-w-[70%] rounded-lg p-3 ${
-                                message.isUser
-                                    ? "bg-black text-white"
-                                    : "bg-white shadow-sm"
+                            key={index}
+                            className={`flex ${
+                                message.isUser ? "justify-end" : "justify-start"
                             }`}
                         >
-                            <p>{message.text}</p>
-                            <span className="text-xs opacity-70 mt-1 block">
-                                {message.timestamp.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                })}
-                            </span>
+                            <div
+                                className={`max-w-[70%] rounded-lg p-3 ${
+                                    message.isUser
+                                        ? "bg-black text-white"
+                                        : "bg-white shadow-sm"
+                                }`}
+                            >
+                                <p>{message.text}</p>
+                                <div className="flex items-center justify-between mt-2">
+                                    <span className="text-xs opacity-70">
+                                        {message.timestamp.toLocaleTimeString([], {
+                                            hour: "2-digit",
+                                            minute: "2-digit",
+                                        })}
+                                    </span>
+                                    {message.audioBase64 && !message.isUser && (
+                                        <div className="flex items-center space-x-2">
+                                            {isPlaying && playingMessageIndex === index && (
+                                                <div className="flex items-center space-x-1">
+                                                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                                                    <span className="text-xs text-green-600">Playing</span>
+                                                </div>
+                                            )}
+                                            <button
+                                                onClick={() => toggleAudioPlayback(message.audioBase64!, index)}
+                                                className={`p-1 rounded-full transition-colors ${
+                                                    isPlaying && playingMessageIndex === index
+                                                        ? "bg-red-100 hover:bg-red-200 text-red-600"
+                                                        : "bg-blue-100 hover:bg-blue-200 text-blue-600"
+                                                }`}
+                                                title={
+                                                    isPlaying && playingMessageIndex === index 
+                                                        ? "Pause audio" 
+                                                        : "Play audio"
+                                                }
+                                            >
+                                                {isPlaying && playingMessageIndex === index ? (
+                                                    <Pause size={16} />
+                                                ) : (
+                                                    <Play size={16} />
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                ))}
+                    ))
+                )}
             </div>
 
             {/* Input form */}
@@ -137,6 +490,7 @@ const Chatbot = () => {
                         onChange={(e) => setInputMessage(e.target.value)}
                         placeholder="Type your message..."
                         className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-black"
+                        disabled={isLoading}
                     />
                     <button
                         type="button"
@@ -147,14 +501,16 @@ const Chatbot = () => {
                                 : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                         }`}
                         title={isListening ? "Stop listening" : "Start listening"}
+                        disabled={isLoading}
                     >
                         {isListening ? <MicOff size={20} /> : <Mic size={20} />}
                     </button>
                     <button
                         type="submit"
-                        className="bg-black text-white px-6 py-2 rounded-lg hover:bg-gray-800 transition-colors"
+                        className="bg-black text-white px-6 py-2 rounded-lg hover:bg-gray-800 transition-colors disabled:bg-gray-400"
+                        disabled={isLoading || !inputMessage.trim()}
                     >
-                        Send
+                        {isLoading ? "..." : "Send"}
                     </button>
                 </div>
             </form>

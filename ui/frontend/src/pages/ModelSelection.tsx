@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from "../components/UploadProgress";
 
@@ -7,6 +7,7 @@ const ModelSelection = () => {
     const [selectedModel, setSelectedModel] = useState<string>('');
     const [apiKey, setApiKey] = useState<string>('');
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
+    const [systemPrompt, setSystemPrompt] = useState<string>('');
 
     const models = [
         { id: 'gemma-3-4b', name: 'Gemma3 4B', requiresKey: false },
@@ -15,9 +16,36 @@ const ModelSelection = () => {
         { id: 'gpt-4o-mini', name: 'GPT-4o-mini', requiresKey: true },
     ];
 
-    const handleSubmit = () => {
+    // Prefill system prompt based on character name
+    useEffect(() => {
+        const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+        const characterName = characterData.name || 'the character';
         
-        if (selectedModel && (!models.find(m => m.id === selectedModel)?.requiresKey || apiKey)) {
+        const defaultSystemPrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
+        setSystemPrompt(defaultSystemPrompt);
+    }, []);
+
+    const handleSubmit = () => {
+        if (selectedModel && (!models.find(m => m.id === selectedModel)?.requiresKey || apiKey) && systemPrompt.trim()) {
+            // Get existing character data from session storage
+            const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+            
+            // Add model configuration
+            const modelConfig = {
+                model_path: selectedModel,
+                system_prompt: systemPrompt.trim(),
+                ...(apiKey && { api_key: apiKey })
+            };
+
+            const updatedData = {
+                ...existingData,
+                llm_model: selectedModel,
+                llm_config: modelConfig
+            };
+
+            // Store updated data
+            sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
+            
             // Navigate to next step
             navigate('/knowledge-base');
         }
@@ -68,6 +96,24 @@ const ModelSelection = () => {
                         />
                     </div>
                 )}
+
+                {/* System Prompt Configuration */}
+                <div className="mt-4">
+                    <label htmlFor="systemPrompt" className="block text-sm font-medium text-gray-700 mb-1">
+                        System Prompt
+                    </label>
+                    <textarea
+                        id="systemPrompt"
+                        value={systemPrompt}
+                        onChange={(e) => setSystemPrompt(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                        rows={3}
+                        placeholder="Enter the system prompt that defines how your character should behave..."
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                        This prompt defines your character's personality and response style. Keep it concise for better results.
+                    </p>
+                </div>
             </div>
 
             <div className="flex justify-end space-x-2">
@@ -79,9 +125,9 @@ const ModelSelection = () => {
                 </button>
                 <button
                     onClick={handleSubmit}
-                    disabled={!selectedModel || (showApiKey && !apiKey)}
+                    disabled={!selectedModel || (showApiKey && !apiKey) || !systemPrompt.trim()}
                     className={`px-4 py-2 rounded-md ${
-                        selectedModel && (!showApiKey || apiKey)
+                        selectedModel && (!showApiKey || apiKey) && systemPrompt.trim()
                             ? 'bg-black text-white hover:bg-gray-800'
                             : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     }`}

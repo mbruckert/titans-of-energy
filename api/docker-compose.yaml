@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: titans_user
+      POSTGRES_PASSWORD: titans_password
+      POSTGRES_DB: titans_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # (optional) add a healthcheck so app will wait until Postgres is actually ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U titans_user -d titans_db"]
+      interval: 5s
+      retries: 5
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    volumes:
+      # Persist ChromaDB database
+      - chroma_data:/app/chroma_db
+      # Persist storage directory (for audio files, etc.)
+      - storage_data:/app/storage
+      # Persist outputs directory (for generated content)
+      - outputs_data:/app/outputs
+    environment:
+      # these map to your get_db_connection() calls:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: titans_user
+      DB_PASSWORD: titans_password
+      DB_NAME: titans_db
+      # you can also keep PG* here if other libraries need them
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: titans_user
+      PGPASSWORD: titans_password
+      PGDATABASE: titans_db
+
+  frontend:
+    build:
+      context: ../ui/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      # Mount source code for hot reloading in development
+      - ../ui/frontend/src:/app/src
+      - ../ui/frontend/public:/app/public
+      - ../ui/frontend/index.html:/app/index.html
+      - ../ui/frontend/vite.config.ts:/app/vite.config.ts
+      - ../ui/frontend/tsconfig.json:/app/tsconfig.json
+      - ../ui/frontend/tsconfig.app.json:/app/tsconfig.app.json
+      - ../ui/frontend/tsconfig.node.json:/app/tsconfig.node.json
+      - ../ui/frontend/eslint.config.js:/app/eslint.config.js
+      # Exclude node_modules to avoid conflicts
+      - /app/node_modules
+    depends_on:
+      - app
+
+volumes:
+  db_data:
+  chroma_data:
+  storage_data:
+  outputs_data:

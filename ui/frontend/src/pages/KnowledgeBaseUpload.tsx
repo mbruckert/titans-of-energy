@@ -23,10 +23,34 @@ const KnowledgeBaseUpload = () => {
   };
 
   const handleSubmit = () => {
-    // file upload logic TODO
-    console.log('Uploading files:', files);
+    // Initialize global file storage if it doesn't exist
+    if (!window.characterCreationFiles) {
+      window.characterCreationFiles = {};
+    }
+    
+    // Store knowledge base files in global storage
+    if (files.length > 0) {
+      window.characterCreationFiles.knowledgeBaseFiles = files;
+      console.log('Knowledge base files stored:', files.map(f => f.name));
+    }
+    
+    // Get existing character data from session storage
+    const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+    
+    // Add knowledge base configuration (not the actual files)
+    const updatedData = {
+      ...existingData,
+      hasKnowledgeBase: files.length > 0,
+      knowledgeBaseFileCount: files.length
+    };
+
+    // Store updated data (without File objects)
+    sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
+    
     navigate('/voice-cloning');
   };
+
+
 
   return (
     <div className="container mx-auto p-4 max-w-2xl">
@@ -77,7 +101,7 @@ const KnowledgeBaseUpload = () => {
         )}
       </div>
 
-      <div className="flex justify-end space-x-2">
+      <div className="flex justify-between">
         <button
           onClick={() => navigate('/model-selection')}
           className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
@@ -88,10 +112,12 @@ const KnowledgeBaseUpload = () => {
           onClick={handleSubmit}
           disabled={files.length === 0}
           className={`px-4 py-2 rounded-md ${
-            files.length > 0 ? 'bg-black text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            files.length > 0
+              ? 'bg-black text-white hover:bg-gray-800'
+              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
           }`}
         >
-          Upload
+          Continue
         </button>
       </div>
 

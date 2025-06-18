@@ -13,7 +13,7 @@ import base64
 import pygame
 import io
 import tempfile
-import whisper  # pip install openai-whisper
+import whisper  # Changed from whisper_tts to whisper
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -498,4 +498,4 @@ finally:
         pygame.mixer.quit()
     except:
         pass
-    print("🏁 Program ended.")
+    print("�� Program ended.")

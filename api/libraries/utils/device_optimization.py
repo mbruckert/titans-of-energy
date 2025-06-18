@@ -133,27 +133,27 @@ def _get_compute_capability(gpu_name: str) -> str:
 
 
 def _detect_amd_gpu() -> bool:
-    """Basic AMD GPU detection."""
+    """Basic AMD GPU detection via ROCm CLI or PyTorch."""
+    # 1) Try ROCm CLI
     try:
-        # Try rocm-smi for AMD GPUs
         result = subprocess.run(
             ["rocm-smi", "--showproductname"],
             capture_output=True,
             text=True,
             timeout=5
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    # Try PyTorch ROCm detection
+    # 2) Fall back to PyTorch ROCm backend detection
     try:
         import torch
-        return hasattr(torch.backends, 'cuda') and torch.backends.cuda.is_available()
+        # torch.cuda.is_available() returns True under ROCm
+        return torch.cuda.is_available()
     except ImportError:
-        pass
-
-    return False
+        return False
 
 
 def _get_nvidia_info(gpu_info: GPUInfo) -> Dict[str, Any]:
