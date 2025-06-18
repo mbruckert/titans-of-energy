@@ -16,7 +16,9 @@ services:
       retries: 5
 
   app:
-    build: .
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     depends_on:
       db:
         condition: service_healthy
@@ -29,23 +31,16 @@ services:
       - storage_data:/app/storage
       # Persist outputs directory (for generated content)
       - outputs_data:/app/outputs
+    env_file:
+      - .env
     environment:
-      # these map to your get_db_connection() calls:
+      # Override specific values from .env if needed
       DB_HOST: db
-      DB_PORT: "5432"
-      DB_USER: titans_user
-      DB_PASSWORD: titans_password
-      DB_NAME: titans_db
-      # you can also keep PG* here if other libraries need them
       PGHOST: db
-      PGPORT: "5432"
-      PGUSER: titans_user
-      PGPASSWORD: titans_password
-      PGDATABASE: titans_db
 
   frontend:
     build:
-      context: ../ui/frontend
+      context: ./ui/frontend
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
@@ -53,14 +48,14 @@ services:
       - NODE_ENV=development
     volumes:
       # Mount source code for hot reloading in development
-      - ../ui/frontend/src:/app/src
-      - ../ui/frontend/public:/app/public
-      - ../ui/frontend/index.html:/app/index.html
-      - ../ui/frontend/vite.config.ts:/app/vite.config.ts
-      - ../ui/frontend/tsconfig.json:/app/tsconfig.json
-      - ../ui/frontend/tsconfig.app.json:/app/tsconfig.app.json
-      - ../ui/frontend/tsconfig.node.json:/app/tsconfig.node.json
-      - ../ui/frontend/eslint.config.js:/app/eslint.config.js
+      - ./ui/frontend/src:/app/src
+      - ./ui/frontend/public:/app/public
+      - ./ui/frontend/index.html:/app/index.html
+      - ./ui/frontend/vite.config.ts:/app/vite.config.ts
+      - ./ui/frontend/tsconfig.json:/app/tsconfig.json
+      - ./ui/frontend/tsconfig.app.json:/app/tsconfig.app.json
+      - ./ui/frontend/tsconfig.node.json:/app/tsconfig.node.json
+      - ./ui/frontend/eslint.config.js:/app/eslint.config.js
       # Exclude node_modules to avoid conflicts
       - /app/node_modules
     depends_on:

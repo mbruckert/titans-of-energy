@@ -15,7 +15,6 @@ import pygame
 import io
 import tempfile
 from scipy.io.wavfile import write
-from transformers import (Wav2Vec2Processor, Wav2Vec2ForCTC, HubertForCTC)
 
 # Set environment variables to potentially fix bus errors
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -36,10 +35,14 @@ signal.signal(signal.SIGINT, signal_handler)
 
 # ---------------- CLI Arguments ----------------
 parser = argparse.ArgumentParser(
-    description="🎤 Voice-activated recorder and transcriber using Wav2Vec2 or HuBERT")
+    description="🎤 Voice-activated recorder and transcriber using Whisper, Wav2Vec2, or HuBERT")
 
 parser.add_argument(
-    "--model", choices=["wav2vec2", "hubert"], default="hubert", help="Choose STT model")
+    "--model", choices=["whisper", "wav2vec2", "hubert"], default="whisper",
+    help="Choose STT model (default: whisper)")
+parser.add_argument(
+    "--whisper_size", choices=["tiny", "base", "small", "medium", "large", "large-v2"],
+    default="small", help="Whisper model size (only used with --model whisper)")
 parser.add_argument("--threshold", type=float, default=0.05,
                     help="Volume threshold to start recording")
 parser.add_argument("--silence", type=float, default=2.0,
@@ -55,12 +58,11 @@ parser.add_argument("--character_id", type=int, required=True,
 
 args = parser.parse_args()
 
-# ---------------- Model Mapping ----------------
-model_map = {
+# ---------------- Model Configuration ----------------
+hf_model_map = {
     "wav2vec2": "facebook/wav2vec2-large-960h",
     "hubert": "facebook/hubert-large-ls960-ft"
 }
-hf_model_id = model_map[args.model]
 
 # ---------------- Configuration ----------------
 sample_rate = 16000
@@ -87,33 +89,100 @@ except pygame.error as e:
     print(f"⚠️ Warning: Could not initialize pygame mixer: {e}")
     print("Audio playback may not work properly.")
 
-# ---------------- Load Model ----------------
-print(f"📦 Loading model: {args.model}...")
+# ---------------- Load Models ----------------
+model = None
+processor = None
+whisper_model = None
+
+print(f"📦 Loading {args.model} model...")
 
 try:
-    processor = Wav2Vec2Processor.from_pretrained(hf_model_id)
-
-    if args.model == "wav2vec2":
-        model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-large-960h")
+    if args.model == "whisper":
+        import whisper
+        whisper_model = whisper.load_model(args.whisper_size)
+        print(f"✅ Whisper {args.whisper_size} model loaded successfully!")
     else:
-        model = HubertForCTC.from_pretrained("facebook/hubert-large-ls960-ft")
+        from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC, HubertForCTC
 
-    # Move model to CPU explicitly to avoid MPS issues
-    model = model.to('cpu')
-    model.eval()
+        hf_model_id = hf_model_map[args.model]
+        processor = Wav2Vec2Processor.from_pretrained(hf_model_id)
 
-    print("✅ Model loaded successfully!")
+        if args.model == "wav2vec2":
+            model = Wav2Vec2ForCTC.from_pretrained(
+                "facebook/wav2vec2-large-960h")
+        else:  # hubert
+            model = HubertForCTC.from_pretrained(
+                "facebook/hubert-large-ls960-ft")
+
+        # Move model to CPU explicitly to avoid MPS issues
+        model = model.to('cpu')
+        model.eval()
+        print(f"✅ {args.model.capitalize()} model loaded successfully!")
 
 except Exception as e:
-    print(f"❌ Error loading model: {e}")
+    print(f"❌ Error loading {args.model} model: {e}")
     exit(1)
 
 # ---------------- Helper Functions ----------------
 
 
-def transcribe_audio(audio_path):
+def transcribe_whisper(audio_path):
+    """Transcribe audio using Whisper"""
     try:
-        print(f"🔍 Analyzing audio file: {audio_path}")
+        print(f"🔍 Analyzing audio file with Whisper: {audio_path}")
+
+        # Check file size
+        file_size = os.path.getsize(audio_path)
+        print(f"📊 Audio file size: {file_size} bytes")
+
+        if file_size < 1000:  # Less than 1KB is probably too short
+            print("⚠️ Audio file too small, skipping transcription")
+            return "Audio too short"
+
+        # Load and analyze audio
+        audio = whisper.load_audio(audio_path)
+        print(
+            f"📊 Audio length: {len(audio)} samples ({len(audio)/16000:.2f} seconds)")
+
+        # Check if audio has sufficient volume
+        audio_rms = np.sqrt(np.mean(audio**2))
+        print(f"📊 Audio RMS: {audio_rms:.6f}")
+
+        if audio_rms < 0.001:  # Very quiet audio
+            print("⚠️ Audio appears to be very quiet")
+
+        # Transcribe with more options
+        result = whisper_model.transcribe(
+            audio_path,
+            language="en",
+            verbose=True,
+            word_timestamps=True,
+            temperature=0.0  # More deterministic
+        )
+
+        transcript = result["text"].strip()
+        print(f"🔍 Raw transcript: '{transcript}'")
+        print(f"📊 Confidence segments: {len(result.get('segments', []))}")
+
+        if not transcript:
+            print("⚠️ Empty transcript - trying without language constraint")
+            result = whisper_model.transcribe(
+                audio_path, verbose=True, temperature=0.0)
+            transcript = result["text"].strip()
+
+        return transcript if transcript else "No speech detected"
+
+    except Exception as e:
+        print(f"❌ Whisper transcription error: {e}")
+        import traceback
+        traceback.print_exc()
+        return "Error in transcription"
+
+
+def transcribe_transformers(audio_path):
+    """Transcribe audio using Wav2Vec2 or HuBERT"""
+    try:
+        print(f"🔍 Analyzing audio file with {args.model}: {audio_path}")
 
         # Check file size
         file_size = os.path.getsize(audio_path)
@@ -172,76 +241,18 @@ def transcribe_audio(audio_path):
         return transcription if transcription else "No speech detected"
 
     except Exception as e:
-        print(f"❌ Transcription error: {e}")
+        print(f"❌ {args.model} transcription error: {e}")
         import traceback
         traceback.print_exc()
         return "Error in transcription"
 
 
-def callback(indata, frames, time_info, status):
-    global is_recording, silence_start, recording, recording_start_time, is_processing_response
-
-    # Don't start new recordings while processing API response
-    if is_processing_response:
-        return
-
-    try:
-        # Calculate multiple audio features for better voice detection
-        volume_norm = np.linalg.norm(indata)
-        volume_rms = np.sqrt(np.mean(indata**2))
-        volume_max = np.max(np.abs(indata))
-
-        # Use RMS for more stable voice detection
-        current_volume = volume_rms
-
-        # Debug: Print volume levels occasionally
-        if int(time.time() * 10) % 100 == 0:  # Every 10 seconds
-            print(
-                f"🔊 Volume - RMS: {volume_rms:.4f}, Max: {volume_max:.4f}, Norm: {volume_norm:.4f} (threshold: {threshold})")
-
-        # Voice activity detection with hysteresis
-        voice_detected = current_volume > threshold
-
-        # Additional check: ensure it's not just noise by checking consistency
-        if voice_detected and len(recording) > 0:
-            # Check if volume is consistently above a lower threshold
-            recent_volumes = [np.sqrt(np.mean(chunk**2))
-                              for chunk in recording[-5:]]  # Last 5 chunks
-            if len(recent_volumes) >= 3:
-                avg_recent_volume = np.mean(recent_volumes)
-                if avg_recent_volume < threshold * 0.3:  # If recent average is too low, might be noise
-                    voice_detected = False
-
-        if voice_detected:
-            if not is_recording:
-                print(
-                    f"🎙️ Voice detected (RMS: {current_volume:.4f}). Recording started.")
-                is_recording = True
-                recording_start_time = time.time()
-            silence_start = None
-            recording.append(indata.copy())
-        elif is_recording:
-            # Continue recording for a bit even during brief pauses
-            recording.append(indata.copy())
-
-            if silence_start is None:
-                silence_start = time.time()
-            elif time.time() - silence_start > silence_duration:
-                recording_duration = time.time() - recording_start_time
-                if recording_duration >= min_recording_duration:
-                    print(
-                        f"🛑 Silence detected. Recording stopped (duration: {recording_duration:.1f}s).")
-                    is_recording = False
-                    silence_start = None
-                else:
-                    print(
-                        f"⚠️ Recording too short ({recording_duration:.1f}s), discarding...")
-                    recording = []
-                    is_recording = False
-                    silence_start = None
-
-    except Exception as e:
-        print(f"❌ Callback error: {e}")
+def transcribe_audio(audio_path):
+    """Transcribe audio using the selected model"""
+    if args.model == "whisper":
+        return transcribe_whisper(audio_path)
+    else:
+        return transcribe_transformers(audio_path)
 
 
 def call_character_api(question):
@@ -349,18 +360,23 @@ def play_audio_fallback(audio_data):
 def play_thinking_audio():
     """Play thinking audio while waiting for API response"""
     try:
-        # Look for thinking audio file in current directory
-        thinking_audio_path = "/Users/markbruckert/Documents/speech_to_text/thinking_audio.wav"
-        if not os.path.exists(thinking_audio_path):
-            # Try alternative names
-            alt_paths = ["generated_thinking_audio.wav", "thinking.wav"]
-            for alt_path in alt_paths:
-                if os.path.exists(alt_path):
-                    thinking_audio_path = alt_path
-                    break
-            else:
-                print("⚠️ Thinking audio file not found, skipping...")
-                return None
+        # Look for thinking audio file in current directory and common locations
+        thinking_audio_paths = [
+            "thinking_audio.wav",
+            "generated_thinking_audio.wav",
+            "thinking.wav",
+            "/Users/markbruckert/Documents/speech_to_text/thinking_audio.wav"
+        ]
+
+        thinking_audio_path = None
+        for path in thinking_audio_paths:
+            if os.path.exists(path):
+                thinking_audio_path = path
+                break
+
+        if not thinking_audio_path:
+            print("⚠️ Thinking audio file not found, skipping...")
+            return None
 
         print("🤔 Playing thinking audio...")
 
@@ -444,9 +460,77 @@ def process_transcription_and_response(transcription):
         return False
 
 
+def callback(indata, frames, time_info, status):
+    global is_recording, silence_start, recording, recording_start_time, is_processing_response
+
+    # Don't start new recordings while processing API response
+    if is_processing_response:
+        return
+
+    try:
+        # Calculate multiple audio features for better voice detection
+        volume_norm = np.linalg.norm(indata)
+        volume_rms = np.sqrt(np.mean(indata**2))
+        volume_max = np.max(np.abs(indata))
+
+        # Use RMS for more stable voice detection
+        current_volume = volume_rms
+
+        # Debug: Print volume levels occasionally
+        if int(time.time() * 10) % 100 == 0:  # Every 10 seconds
+            print(
+                f"🔊 Volume - RMS: {volume_rms:.4f}, Max: {volume_max:.4f}, Norm: {volume_norm:.4f} (threshold: {threshold})")
+
+        # Voice activity detection with hysteresis
+        voice_detected = current_volume > threshold
+
+        # Additional check: ensure it's not just noise by checking consistency
+        if voice_detected and len(recording) > 0:
+            # Check if volume is consistently above a lower threshold
+            recent_volumes = [np.sqrt(np.mean(chunk**2))
+                              for chunk in recording[-5:]]  # Last 5 chunks
+            if len(recent_volumes) >= 3:
+                avg_recent_volume = np.mean(recent_volumes)
+                if avg_recent_volume < threshold * 0.3:  # If recent average is too low, might be noise
+                    voice_detected = False
+
+        if voice_detected:
+            if not is_recording:
+                print(
+                    f"🎙️ Voice detected (RMS: {current_volume:.4f}). Recording started.")
+                is_recording = True
+                recording_start_time = time.time()
+            silence_start = None
+            recording.append(indata.copy())
+        elif is_recording:
+            # Continue recording for a bit even during brief pauses
+            recording.append(indata.copy())
+
+            if silence_start is None:
+                silence_start = time.time()
+            elif time.time() - silence_start > silence_duration:
+                recording_duration = time.time() - recording_start_time
+                if recording_duration >= min_recording_duration:
+                    print(
+                        f"🛑 Silence detected. Recording stopped (duration: {recording_duration:.1f}s).")
+                    is_recording = False
+                    silence_start = None
+                else:
+                    print(
+                        f"⚠️ Recording too short ({recording_duration:.1f}s), discarding...")
+                    recording = []
+                    is_recording = False
+                    silence_start = None
+
+    except Exception as e:
+        print(f"❌ Callback error: {e}")
+
+
 # ---------------- Main Loop ----------------
 print("🎧 Listening... Speak to start recording.")
 print(f"🔊 Volume threshold: {threshold}")
+print(f"🤖 Using {args.model} model" +
+      (f" ({args.whisper_size})" if args.model == "whisper" else ""))
 print("Press Ctrl+C to quit.")
 
 start_session = time.time()
@@ -491,7 +575,7 @@ try:
                     print(f"✅ Saved as {filename}")
 
                     try:
-                        # Transcribe the audio locally
+                        # Transcribe the audio
                         print("📝 Transcribing...")
                         transcript = transcribe_audio(filename)
                         print(f"📄 Transcript: '{transcript}'")
@@ -536,4 +620,4 @@ finally:
         pygame.mixer.quit()
     except:
         pass
-    print("�� Program ended.")
+    print("✅ Program ended.")
