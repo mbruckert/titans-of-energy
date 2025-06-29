@@ -262,7 +262,7 @@ def call_character_api(question):
         url = f"{api_base_url}/ask-question-text"
         payload = {"character_id": character_id, "question": question}
 
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, timeout=60)
 
         if response.status_code == 200:
             return response.json()

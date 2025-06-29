@@ -1,6 +1,0 @@
-unsloth
-torch
-datasets
-requests
-chromadb
-transformers @ git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3
