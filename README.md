@@ -95,32 +95,32 @@ The unified speech-to-text CLI supports multiple models:
 
 ```bash
 # Use Whisper (default) with character ID 1
-python speech_to_text.py --character_id 1
+python character_interaction.py --character_id 1
 
 # Use different Whisper model size
-python speech_to_text.py --model whisper --whisper_size base --character_id 1
+python character_interaction.py --model whisper --whisper_size base --character_id 1
 
 # Use Wav2Vec2 model
-python speech_to_text.py --model wav2vec2 --character_id 1
+python character_interaction.py --model wav2vec2 --character_id 1
 
 # Use HuBERT model
-python speech_to_text.py --model hubert --character_id 1
+python character_interaction.py --model hubert --character_id 1
 ```
 
 ### Advanced CLI Options
 
 ```bash
 # Customize voice detection sensitivity
-python speech_to_text.py --threshold 0.03 --character_id 1
+python character_interaction.py --threshold 0.03 --character_id 1
 
 # Adjust silence detection (seconds before stopping)
-python speech_to_text.py --silence 1.5 --character_id 1
+python character_interaction.py --silence 1.5 --character_id 1
 
 # Set maximum session time
-python speech_to_text.py --max_time 600 --character_id 1
+python character_interaction.py --max_time 600 --character_id 1
 
 # Use different API endpoint
-python speech_to_text.py --api_endpoint http://localhost:5000 --character_id 1
+python character_interaction.py --api_endpoint http://localhost:5000 --character_id 1
 ```
 
 ### CLI Workflow
@@ -135,7 +135,7 @@ python speech_to_text.py --api_endpoint http://localhost:5000 --character_id 1
 ### CLI Command Reference
 
 ```bash
-python speech_to_text.py [OPTIONS]
+python character_interaction.py [OPTIONS]
 
 Options:
   --model {whisper,wav2vec2,hubert}  Choose STT model (default: whisper)
