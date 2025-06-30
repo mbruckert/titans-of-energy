@@ -5,11 +5,14 @@ export const API_ENDPOINTS = {
   GET_CHARACTERS: '/get-characters',
   GET_CHARACTER: '/get-character',
   CREATE_CHARACTER: '/create-character',
+  UPDATE_CHARACTER: '/update-character',
+  DELETE_CHARACTER: '/delete-character',
   LOAD_CHARACTER: '/load-character',
   
   // Question endpoints
   ASK_QUESTION_TEXT: '/ask-question-text',
   ASK_QUESTION_AUDIO: '/ask-question-audio',
+  TRANSCRIBE_AUDIO: '/transcribe-audio',
   
   // Chat history endpoints
   GET_CHAT_HISTORY: '/get-chat-history',

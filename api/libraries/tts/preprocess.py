@@ -10,6 +10,7 @@ import soundfile as sf
 import resampy
 import torch
 from df.enhance import enhance, init_df
+import time
 
 # Import device optimization utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
@@ -85,13 +86,19 @@ def _download_f5tts(cache_dir: Optional[str] = None, force_download: bool = Fals
         # Check if F5-TTS is already installed and working
         if not force_download:
             try:
+                # Create clean environment for subprocess calls
+                clean_env = os.environ.copy()
+                # Fix F5-TTS installation issue
+                clean_env['PYTHONHASHSEED'] = 'random'
+
                 # First try a quick import check
                 result = subprocess.run(
                     [sys.executable, "-c",
                         "import f5_tts; print('F5-TTS importable')"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
+                    env=clean_env
                 )
                 if result.returncode == 0:
                     print("F5-TTS Python package is available")
@@ -101,7 +108,8 @@ def _download_f5tts(cache_dir: Optional[str] = None, force_download: bool = Fals
                             ["f5-tts_infer-cli", "--help"],
                             capture_output=True,
                             text=True,
-                            timeout=30  # Increased timeout for CLI initialization
+                            timeout=30,  # Increased timeout for CLI initialization
+                            env=clean_env
                         )
                         if cli_result.returncode == 0:
                             print("F5-TTS is already installed and accessible")
@@ -126,11 +134,16 @@ def _download_f5tts(cache_dir: Optional[str] = None, force_download: bool = Fals
         if force_download:
             cmd.append("--force-reinstall")
 
+        # Create clean environment for installation
+        clean_env = os.environ.copy()
+        clean_env['PYTHONHASHSEED'] = 'random'  # Fix F5-TTS installation issue
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minutes timeout
+            timeout=300,  # 5 minutes timeout
+            env=clean_env
         )
 
         if result.returncode == 0:
@@ -143,7 +156,8 @@ def _download_f5tts(cache_dir: Optional[str] = None, force_download: bool = Fals
                     "import f5_tts; print('F5-TTS import successful')"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
+                env=clean_env
             )
 
             if import_result.returncode == 0:
@@ -155,7 +169,8 @@ def _download_f5tts(cache_dir: Optional[str] = None, force_download: bool = Fals
                         ["f5-tts_infer-cli", "--help"],
                         capture_output=True,
                         text=True,
-                        timeout=30  # Increased timeout for CLI
+                        timeout=30,  # Increased timeout for CLI
+                        env=clean_env
                     )
 
                     if verify_result.returncode == 0:
@@ -523,7 +538,7 @@ def generate_reference_audio(
 
 
 def _clean_audio(input_file: str, temp_files: List[str]) -> str:
-    """Clean audio using DeepFilterNet for noise reduction with hardware optimization."""
+    """Clean audio using DeepFilterNet for noise reduction with comprehensive hardware optimization."""
     temp_file = tempfile.mktemp(suffix='.wav')
     temp_files.append(temp_file)
 
@@ -534,33 +549,90 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
         # Initialize the DeepFilterNet model with device optimization
         model, state, _ = init_df()
 
-        # Apply device-specific optimizations
+        # Apply comprehensive device-specific optimizations
         if DEVICE_OPTIMIZATION_AVAILABLE:
             if device_type == DeviceType.NVIDIA_GPU:
-                # Move model to GPU if available
+                # NVIDIA GPU optimizations
                 try:
                     device = torch.device("cuda:0")
                     model = model.to(device)
+
+                    # Enable mixed precision if supported
+                    if device_info.get('mixed_precision', True):
+                        try:
+                            model = model.half()
+                            print(
+                                f"✓ Using mixed precision (FP16) for DeepFilterNet on {device_info.get('device_name', 'GPU')}")
+                        except Exception as e:
+                            print(
+                                f"Warning: Mixed precision failed for DeepFilterNet: {e}")
+
+                    # Apply torch.compile for high-end GPUs
+                    if device_info.get('is_high_end', False) and hasattr(torch, 'compile'):
+                        try:
+                            model = torch.compile(
+                                model, mode="reduce-overhead")
+                            print(
+                                "✓ Applied torch.compile optimization to DeepFilterNet")
+                        except Exception as e:
+                            print(
+                                f"Warning: torch.compile failed for DeepFilterNet: {e}")
+
+                    # Set CUDA optimizations
+                    torch.backends.cudnn.benchmark = True
+                    torch.backends.cudnn.enabled = True
+
                     print(
-                        f"Using GPU acceleration for audio cleaning on {device_info.get('device_name', 'GPU')}")
+                        f"✓ Using NVIDIA GPU acceleration for audio cleaning on {device_info.get('device_name', 'GPU')}")
+
                 except Exception as e:
                     print(f"Warning: Could not move DeepFilterNet to GPU: {e}")
+
             elif device_type == DeviceType.APPLE_SILICON:
-                # Try to use MPS if available
+                # Apple Silicon optimizations
                 try:
                     if torch.backends.mps.is_available():
                         device = torch.device("mps")
                         model = model.to(device)
+
+                        # Apply MPS optimizations
+                        if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
+                            torch.backends.mps.set_per_process_memory_fraction(
+                                0.8)
+
+                        # Set optimal thread counts for Apple Silicon
+                        optimal_threads = min(
+                            device_info.get('cpu_count', 8), 8)
+                        torch.set_num_threads(optimal_threads)
+
                         print(
-                            f"Using MPS acceleration for audio cleaning on {device_info.get('device_name', 'Apple Silicon')}")
+                            f"✓ Using MPS acceleration for audio cleaning on {device_info.get('device_name', 'Apple Silicon')}")
+                        print(f"✓ Optimized thread count: {optimal_threads}")
+                    else:
+                        # CPU fallback with optimized thread count
+                        optimal_threads = min(
+                            device_info.get('cpu_count', 8), 8)
+                        torch.set_num_threads(optimal_threads)
+                        print(
+                            f"✓ Using optimized CPU processing for audio cleaning with {optimal_threads} threads")
+
                 except Exception as e:
-                    print(f"Warning: Could not move DeepFilterNet to MPS: {e}")
+                    print(
+                        f"Warning: Could not optimize DeepFilterNet for Apple Silicon: {e}")
+            else:
+                # CPU optimizations
+                cpu_count = device_info.get('cpu_count', 4)
+                optimal_threads = min(cpu_count, 8)
+                torch.set_num_threads(optimal_threads)
+                print(
+                    f"✓ Using CPU processing for audio cleaning with {optimal_threads} threads")
 
         # Read and process audio
         audio_data, sample_rate = sf.read(input_file, always_2d=True)
 
         # Resample if necessary
         if sample_rate != state.sr():
+            print(f"Resampling audio from {sample_rate}Hz to {state.sr()}Hz")
             audio_data = resampy.resample(audio_data, sample_rate, state.sr())
             sample_rate = state.sr()
 
@@ -572,11 +644,25 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
         if hasattr(model, 'device'):
             audio_tensor = audio_tensor.to(model.device)
 
-        # Enhance audio with device optimization
-        # Note: DeepFilterNet uses complex numbers, so we avoid mixed precision autocast
-        # which can cause issues with ComplexHalf on CUDA
-        with torch.no_grad():  # Use no_grad for inference
-            enhanced_audio = enhance(model, state, audio_tensor)
+        # Enhance audio with device-specific optimization
+        # Note: DeepFilterNet can be sensitive to mixed precision with complex numbers
+        start_time = time.perf_counter()
+
+        with torch.no_grad():  # Use no_grad for inference to save memory
+            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+                # Use mixed precision carefully with DeepFilterNet
+                mixed_precision_enabled = device_info.get(
+                    'mixed_precision', True)
+                if mixed_precision_enabled and hasattr(model, 'dtype') and model.dtype == torch.float16:
+                    # Convert to half precision for inference
+                    audio_tensor = audio_tensor.half()
+
+                enhanced_audio = enhance(model, state, audio_tensor)
+            else:
+                enhanced_audio = enhance(model, state, audio_tensor)
+
+        processing_time = time.perf_counter() - start_time
+        print(f"✓ Audio cleaning completed in {processing_time:.3f}s")
 
         # Convert back to numpy array
         enhanced_audio = enhanced_audio.detach().cpu().numpy()

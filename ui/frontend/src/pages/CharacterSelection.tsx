@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import CharacterCard from '../components/CharacterCard';
 import AddCharacterModal from '../components/AddCharacterModal';
+import EditCharacterModal from '../components/EditCharacterModal';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
 
 interface Character {
@@ -15,6 +16,8 @@ interface Character {
 function CharacterSelection() {
   const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [selectedCharacter, setSelectedCharacter] = useState<Character | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +80,52 @@ function CharacterSelection() {
     });
   };
 
+  const handleVoiceChat = (character: Character) => {
+    navigate('/voice-interaction', { 
+      state: { 
+        characterId: character.id,
+        characterName: character.name,
+        characterImage: character.image_base64 
+      } 
+    });
+  };
+
+  const handleEditCharacter = (character: Character) => {
+    setSelectedCharacter(character);
+    setIsEditModalOpen(true);
+  };
+
+  const handleDeleteCharacter = async (character: Character) => {
+    if (!confirm(`Are you sure you want to delete "${character.name}"? This action cannot be undone and will delete all associated data including chat history, knowledge base, and voice cloning data.`)) {
+      return;
+    }
+
+    setError(null);
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.DELETE_CHARACTER}/${character.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete character');
+      }
+
+      // Show success message and refresh the character list
+      console.log(`Character "${character.name}" deleted successfully`);
+      fetchCharacters();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred while deleting the character');
+    }
+  };
+
+  const handleEditSuccess = () => {
+    setIsEditModalOpen(false);
+    setSelectedCharacter(null);
+    fetchCharacters(); // Refresh the character list
+  };
+
   if (isLoading) {
     return (
       <div className="container mx-auto p-4">
@@ -113,6 +162,9 @@ function CharacterSelection() {
             name={character.name}
             image={character.image_base64 || '/public/images/default-character.jpg'}
             onClick={() => handleCharacterClick(character)}
+            onEdit={() => handleEditCharacter(character)}
+            onDelete={() => handleDeleteCharacter(character)}
+            onVoiceChat={() => handleVoiceChat(character)}
           />
         ))}
         <CharacterCard
@@ -127,6 +179,16 @@ function CharacterSelection() {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSubmit={handleSubmitCharacter}
+      />
+
+      <EditCharacterModal
+        isOpen={isEditModalOpen}
+        character={selectedCharacter}
+        onClose={() => {
+          setIsEditModalOpen(false);
+          setSelectedCharacter(null);
+        }}
+        onSuccess={handleEditSuccess}
       />
     </div>
   );

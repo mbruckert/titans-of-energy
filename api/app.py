@@ -3,7 +3,7 @@ from libraries.knowledgebase.retrieval import query_collection
 from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType, preload_llm_model, unload_all_cached_models, get_cached_models_info
 from libraries.llm.preprocess import download_model as download_model_func
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
-from libraries.tts.inference import generate_audio, ensure_model_available, preload_models, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
+from libraries.tts.inference import generate_audio, ensure_model_available, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
 import psycopg2
@@ -16,6 +16,8 @@ from pathlib import Path
 import tempfile
 import shutil
 from typing import Dict, Any, Optional
+import time
+import torch
 
 # Import library modules
 import sys
@@ -42,6 +44,9 @@ STORAGE_DIR.mkdir(exist_ok=True)
 # Create subdirectory for generated audio files
 GENERATED_AUDIO_DIR = STORAGE_DIR / "generated_audio"
 GENERATED_AUDIO_DIR.mkdir(exist_ok=True)
+
+# Track startup time for performance metrics
+_startup_time = time.time()
 
 # Initialize device optimization on startup
 if DEVICE_OPTIMIZATION_AVAILABLE:
@@ -115,6 +120,309 @@ def get_db_connection():
 
 # Global model cache
 model_cache = {}
+
+# STT (Speech-to-Text) optimizations - Global Whisper model cache
+_whisper_model = None
+_whisper_model_size = None
+_stt_device = None
+_stt_load_time = None
+_stt_memory_usage = None
+
+
+def _get_optimal_whisper_model_size(device_type, device_info):
+    """Determine optimal Whisper model size based on device capability."""
+    if not DEVICE_OPTIMIZATION_AVAILABLE:
+        return "small"  # Conservative default
+
+    if device_type == DeviceType.NVIDIA_GPU:
+        gpu_memory = device_info.get('memory_gb', 8)
+        if gpu_memory >= 16 and device_info.get('is_high_end', False):
+            return "large-v3"  # Best quality for high-end GPUs
+        elif gpu_memory >= 12:
+            return "medium"  # Good balance
+        elif gpu_memory >= 8:
+            return "small"  # Memory efficient
+        else:
+            return "tiny"  # Ultra memory efficient
+
+    elif device_type == DeviceType.APPLE_SILICON:
+        if device_info.get('is_high_end', False):  # M1/M2/M3/M4 Max/Ultra
+            return "medium"  # Apple Silicon can handle medium well
+        elif device_info.get('is_pro', False):     # M1/M2/M3/M4 Pro
+            return "small"   # Good balance for Pro chips
+        else:
+            return "small"   # Conservative for base chips
+    else:
+        # CPU-only
+        cpu_count = device_info.get('cpu_count', 4)
+        if cpu_count >= 16:
+            return "small"
+        elif cpu_count >= 8:
+            return "tiny"
+        else:
+            return "tiny"
+
+
+def _get_stt_device(device_type, device_info):
+    """Determine optimal device for STT processing."""
+    if not DEVICE_OPTIMIZATION_AVAILABLE:
+        return "cpu"
+
+    if device_type == DeviceType.NVIDIA_GPU:
+        return "cuda"
+    elif device_type == DeviceType.APPLE_SILICON:
+        # Whisper doesn't fully support MPS yet, use CPU with optimizations
+        return "cpu"
+    else:
+        return "cpu"
+
+
+def _get_whisper_model():
+    """Get or initialize Whisper model with comprehensive device optimization."""
+    global _whisper_model, _whisper_model_size, _stt_device, _stt_load_time, _stt_memory_usage
+
+    if DEVICE_OPTIMIZATION_AVAILABLE:
+        device_type, device_info = get_device_info()
+    else:
+        device_type, device_info = None, {}
+
+    # Determine optimal model size and device
+    optimal_size = _get_optimal_whisper_model_size(device_type, device_info)
+    optimal_device = _get_stt_device(device_type, device_info)
+
+    # Check if we need to reload the model
+    need_reload = (
+        _whisper_model is None or
+        _whisper_model_size != optimal_size or
+        _stt_device != optimal_device
+    )
+
+    if need_reload:
+        try:
+            import whisper
+
+            print(
+                f"🎙️  Loading Whisper model '{optimal_size}' for {device_type.value if device_type else 'default'} on {optimal_device}")
+            start_time = time.perf_counter()
+
+            # Clear previous model if exists
+            if _whisper_model is not None:
+                del _whisper_model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Load new model with device optimization
+            _whisper_model = whisper.load_model(
+                optimal_size, device=optimal_device)
+
+            # Apply device-specific optimizations
+            if DEVICE_OPTIMIZATION_AVAILABLE:
+                if device_type == DeviceType.NVIDIA_GPU:
+                    print("🎯 Applying NVIDIA GPU optimizations to Whisper...")
+
+                    # Enable mixed precision if supported
+                    if device_info.get('mixed_precision', True):
+                        try:
+                            _whisper_model = _whisper_model.half()
+                            print("✓ Enabled mixed precision (FP16) for Whisper")
+                        except Exception as e:
+                            print(
+                                f"Warning: Mixed precision failed for Whisper: {e}")
+
+                    # Apply torch.compile for high-end GPUs
+                    if device_info.get('is_high_end', False) and hasattr(torch, 'compile'):
+                        try:
+                            _whisper_model = torch.compile(
+                                _whisper_model, mode="reduce-overhead")
+                            print("✓ Applied torch.compile optimization to Whisper")
+                        except Exception as e:
+                            print(
+                                f"Warning: torch.compile failed for Whisper: {e}")
+
+                    # Set CUDA optimizations
+                    torch.backends.cudnn.benchmark = True
+                    torch.backends.cudnn.enabled = True
+
+                elif device_type == DeviceType.APPLE_SILICON:
+                    print("🍎 Applying Apple Silicon optimizations to Whisper...")
+
+                    # Set optimal thread counts for Apple Silicon
+                    optimal_threads = min(device_info.get('cpu_count', 8), 8)
+                    torch.set_num_threads(optimal_threads)
+
+                    # Enable Metal Performance Shaders optimizations where possible
+                    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                        try:
+                            # Try to use MPS for some operations (Whisper has limited MPS support)
+                            torch.backends.mps.enabled = True
+                            print("✓ Enabled MPS backend for compatible operations")
+                        except Exception as e:
+                            print(
+                                f"Note: MPS not fully supported for Whisper: {e}")
+
+                    print(f"✓ Optimized thread count: {optimal_threads}")
+
+                    # Enable Accelerate framework optimizations if available
+                    try:
+                        import accelerate
+                        print(
+                            "✓ Accelerate framework available for additional optimizations")
+                    except ImportError:
+                        pass
+
+                else:
+                    print("💻 Applying CPU optimizations to Whisper...")
+
+                    # Set optimal thread counts for CPU
+                    cpu_count = device_info.get('cpu_count', 4)
+                    optimal_threads = min(cpu_count, 8)
+                    torch.set_num_threads(optimal_threads)
+                    print(f"✓ Optimized thread count: {optimal_threads}")
+
+            # Record performance metrics
+            load_time = time.perf_counter() - start_time
+            _stt_load_time = load_time
+            _whisper_model_size = optimal_size
+            _stt_device = optimal_device
+
+            # Estimate memory usage
+            if torch.cuda.is_available() and optimal_device == "cuda":
+                _stt_memory_usage = torch.cuda.memory_allocated() / 1024**3
+                print(
+                    f"✓ Whisper model '{optimal_size}' loaded in {load_time:.2f}s on {optimal_device}")
+                print(f"✓ GPU Memory usage: {_stt_memory_usage:.2f} GB")
+            else:
+                print(
+                    f"✓ Whisper model '{optimal_size}' loaded in {load_time:.2f}s on {optimal_device}")
+
+        except ImportError as e:
+            print(f"Error importing Whisper: {e}")
+            raise ImportError(
+                "Whisper not available. Please install with: pip install openai-whisper")
+        except Exception as e:
+            print(f"Error loading Whisper model: {e}")
+            # Fallback to smaller model
+            try:
+                print("Attempting fallback to 'tiny' model...")
+                _whisper_model = whisper.load_model("tiny", device="cpu")
+                _whisper_model_size = "tiny"
+                _stt_device = "cpu"
+                print("✓ Fallback Whisper model loaded successfully")
+            except Exception as fallback_error:
+                print(f"Fallback also failed: {fallback_error}")
+                raise
+
+    return _whisper_model
+
+
+def _transcribe_audio_optimized(audio_path: str) -> str:
+    """Transcribe audio using optimized Whisper model."""
+    try:
+        # Get optimized Whisper model
+        whisper_model = _get_whisper_model()
+
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            device_type, device_info = get_device_info()
+        else:
+            device_type, device_info = None, {}
+
+        print(
+            f"🎙️  Transcribing audio with Whisper '{_whisper_model_size}' on {_stt_device}")
+        start_time = time.perf_counter()
+
+        # Transcribe with device-specific optimizations
+        transcribe_options = {
+            "language": "en",
+            "task": "transcribe",
+        }
+
+        # Add device-specific transcription options
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            if device_type == DeviceType.NVIDIA_GPU:
+                # NVIDIA GPU specific options
+                transcribe_options.update({
+                    "fp16": device_info.get('mixed_precision', True),
+                    "beam_size": 5 if device_info.get('is_high_end', False) else 3,
+                    "patience": 2.0,
+                })
+            elif device_type == DeviceType.APPLE_SILICON:
+                # Apple Silicon specific options
+                transcribe_options.update({
+                    "fp16": False,  # Apple Silicon works better with FP32 for Whisper
+                    "beam_size": 3 if device_info.get('is_high_end', False) else 1,
+                    "patience": 1.0,
+                })
+            else:
+                # CPU specific options
+                transcribe_options.update({
+                    "fp16": False,
+                    "beam_size": 1,  # Conservative for CPU
+                    "patience": 1.0,
+                })
+
+        # Perform transcription
+        if device_type == DeviceType.NVIDIA_GPU and device_info.get('mixed_precision', True):
+            # Use autocast for mixed precision on NVIDIA GPUs
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                result = whisper_model.transcribe(
+                    audio_path, **transcribe_options)
+        else:
+            result = whisper_model.transcribe(audio_path, **transcribe_options)
+
+        transcript = result["text"].strip()
+        transcription_time = time.perf_counter() - start_time
+
+        print(f"✓ Audio transcription completed in {transcription_time:.3f}s")
+        print(f"✓ Transcript length: {len(transcript)} characters")
+
+        return transcript
+
+    except Exception as e:
+        print(f"Error in optimized audio transcription: {e}")
+        raise
+
+
+def _unload_stt_model():
+    """Unload STT model from memory to free up resources."""
+    global _whisper_model, _whisper_model_size, _stt_device, _stt_load_time, _stt_memory_usage
+
+    if _whisper_model is not None:
+        print("🧹 Unloading Whisper STT model from memory...")
+        del _whisper_model
+        _whisper_model = None
+        _whisper_model_size = None
+        _stt_device = None
+        _stt_load_time = None
+        _stt_memory_usage = None
+
+        # Clear GPU cache if applicable
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("✓ CUDA cache cleared")
+
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+                print("✓ MPS cache cleared")
+            except:
+                pass
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+        print("✓ Whisper STT model unloaded successfully")
+
+
+def get_stt_performance_info() -> Dict[str, Any]:
+    """Get STT model performance information."""
+    return {
+        "model_loaded": _whisper_model is not None,
+        "model_size": _whisper_model_size,
+        "device": _stt_device,
+        "load_time": _stt_load_time,
+        "memory_usage": _stt_memory_usage,
+    }
 
 
 def get_file_url(file_path: str, file_type: str) -> Optional[str]:
@@ -456,7 +764,17 @@ def get_character(character_id):
         # Convert to dict and add image base64
         char_dict = dict(character)
         char_dict['image_base64'] = get_image_base64(char_dict['image_path'])
-        # Remove sensitive file paths for security
+
+        # Keep file path info for edit functionality (but don't expose actual paths)
+        char_dict['has_image'] = bool(char_dict['image_path'])
+        char_dict['has_knowledge_base'] = bool(
+            char_dict['knowledge_base_path'])
+        char_dict['has_voice_cloning'] = bool(
+            char_dict['voice_cloning_audio_path'])
+        char_dict['has_style_tuning'] = bool(
+            char_dict['style_tuning_data_path'])
+
+        # Remove sensitive file paths for security but keep the boolean flags
         char_dict.pop('image_path', None)
         char_dict.pop('knowledge_base_path', None)
         char_dict.pop('voice_cloning_audio_path', None)
@@ -787,6 +1105,213 @@ def ask_question_text():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/transcribe-audio', methods=['POST'])
+def transcribe_audio():
+    """
+    Transcribe audio to text using optimized Whisper with comprehensive device optimization.
+    Expects: multipart/form-data with 'audio_file'
+    Returns: {"transcript": str, "status": "success"}
+    """
+    try:
+        audio_file = request.files.get('audio_file')
+
+        if not audio_file:
+            return jsonify({"error": "audio_file is required"}), 400
+
+        # Save uploaded audio file temporarily
+        temp_audio_path = None
+        try:
+            import tempfile
+            import os
+
+            # Create temporary file
+            temp_fd, temp_audio_path = tempfile.mkstemp(suffix='.webm')
+            os.close(temp_fd)  # Close the file descriptor
+
+            # Save the uploaded audio
+            audio_file.save(temp_audio_path)
+
+            # Transcribe audio using optimized function
+            transcript = _transcribe_audio_optimized(temp_audio_path)
+
+            if not transcript:
+                return jsonify({"error": "No speech detected in audio"}), 400
+
+        except Exception as e:
+            print(f"Audio processing failed: {e}")
+            return jsonify({"error": "Failed to process audio file"}), 500
+        finally:
+            # Clean up temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.unlink(temp_audio_path)
+                except:
+                    pass
+
+        return jsonify({
+            "transcript": transcript,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/ask-question-audio', methods=['POST'])
+def ask_question_audio():
+    """
+    Process audio question by transcribing it to text and returning styled text response with generated audio as base64.
+    Expects: multipart/form-data with 'character_id' and 'audio_file'
+    """
+    try:
+        character_id = request.form.get('character_id')
+        audio_file = request.files.get('audio_file')
+
+        if not character_id or not audio_file:
+            return jsonify({"error": "character_id and audio_file are required"}), 400
+
+        character_id = int(character_id)
+
+        # Get character data
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
+        character = cur.fetchone()
+
+        if not character:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Character not found"}), 404
+
+        character_name = character['name']
+
+        # Save uploaded audio file temporarily
+        temp_audio_path = None
+        try:
+            import tempfile
+            import os
+
+            # Create temporary file
+            temp_fd, temp_audio_path = tempfile.mkstemp(suffix='.webm')
+            os.close(temp_fd)  # Close the file descriptor
+
+            # Save the uploaded audio
+            audio_file.save(temp_audio_path)
+
+            # Transcribe audio to text using Whisper
+            transcript = _transcribe_audio_optimized(temp_audio_path)
+
+        except Exception as e:
+            print(f"Audio processing failed: {e}")
+            return jsonify({"error": "Failed to process audio file"}), 500
+        finally:
+            # Clean up temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.unlink(temp_audio_path)
+                except:
+                    pass
+
+        # Now process the transcribed text like the text endpoint
+        question = transcript
+
+        # Search knowledge base
+        knowledge_context = ""
+        try:
+            kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
+            knowledge_context = query_collection(
+                kb_collection, question, n_results=3)
+        except Exception as e:
+            print(f"Knowledge base search failed: {e}")
+
+        # Get style examples
+        style_examples = []
+        try:
+            style_examples = get_style_data(
+                question, character_name, num_examples=2)
+        except Exception as e:
+            print(f"Style data retrieval failed: {e}")
+
+        # Generate styled text response
+        styled_response = ""
+        if character['llm_model'] and character['llm_config']:
+            try:
+                styled_response = generate_styled_text(
+                    question,
+                    style_examples,
+                    knowledge_context,
+                    character['llm_model'],
+                    character['llm_config'],
+                    character_name=character_name
+                )
+            except Exception as e:
+                print(f"Text generation failed: {e}")
+                styled_response = "I'm sorry, I'm having trouble generating a response right now."
+
+        # Generate audio response as base64
+        audio_base64 = None
+        if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
+            try:
+                from libraries.tts.inference import generate_cloned_audio_base64
+
+                voice_settings = character['voice_cloning_settings']
+                tts_model = voice_settings.get('model', 'f5tts')
+
+                # Use the stored reference text from the character
+                ref_text = character.get('voice_cloning_reference_text', '')
+                if not ref_text:
+                    # Fallback if no reference text was stored
+                    ref_text = "Hello, how can I help you?"
+                    print(
+                        "Warning: No reference text found for character, using fallback")
+
+                # Generate audio as base64
+                audio_base64 = generate_cloned_audio_base64(
+                    model=tts_model,
+                    ref_audio=character['voice_cloning_audio_path'],
+                    ref_text=ref_text,
+                    gen_text=styled_response,
+                    config=voice_settings
+                )
+
+            except Exception as e:
+                print(f"Audio generation failed: {e}")
+                audio_base64 = None
+
+        # Store chat history in database
+        try:
+            cur.execute("""
+                INSERT INTO chat_history 
+                (character_id, user_message, bot_response, audio_base64, knowledge_context)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                character_id,
+                question,
+                styled_response,
+                audio_base64,
+                knowledge_context
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"Failed to store chat history: {e}")
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "transcript": transcript,
+            "question": question,
+            "text_response": styled_response,
+            "audio_base64": audio_base64,
+            "knowledge_context": knowledge_context,
+            "character_name": character_name,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/download-model', methods=['POST'])
 def download_model_endpoint():
     """
@@ -1063,6 +1588,500 @@ def clear_chat_history(character_id):
         return jsonify({
             "message": f"Cleared {deleted_count} messages from chat history",
             "character_id": character_id,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/delete-character/<int:character_id>', methods=['DELETE'])
+def delete_character(character_id):
+    """Delete a character and all associated data."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get character data first
+        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
+        character = cur.fetchone()
+        if not character:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Character not found"}), 404
+
+        character_name = character['name']
+
+        # Delete associated files
+        try:
+            character_dir = STORAGE_DIR / \
+                character_name.replace(' ', '_').lower()
+            if character_dir.exists():
+                shutil.rmtree(character_dir)
+                print(f"Deleted character directory: {character_dir}")
+        except Exception as e:
+            print(f"Warning: Failed to delete character files: {e}")
+
+        # Delete from database (chat history will be deleted automatically due to CASCADE)
+        cur.execute("DELETE FROM characters WHERE id = %s", (character_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": f"Character '{character_name}' deleted successfully",
+            "character_id": character_id,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/update-character/<int:character_id>', methods=['PUT'])
+def update_character(character_id):
+    """
+    Update a character's information and associated data.
+    Expects form data with files and JSON configuration.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get existing character data
+        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
+        character = cur.fetchone()
+        if not character:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Character not found"}), 404
+
+        old_name = character['name']
+        old_character_dir = STORAGE_DIR / old_name.replace(' ', '_').lower()
+
+        # Get form data
+        new_name = request.form.get('name', old_name)
+        llm_model = request.form.get('llm_model', character['llm_model'])
+        llm_config = json.loads(request.form.get(
+            'llm_config', json.dumps(character['llm_config'] or {})))
+        voice_cloning_settings = json.loads(request.form.get(
+            'voice_cloning_settings', json.dumps(character['voice_cloning_settings'] or {})))
+
+        # Extract reference text from voice cloning settings
+        voice_reference_text = voice_cloning_settings.get(
+            'reference_text', character.get('voice_cloning_reference_text', ''))
+
+        # Create new character directory if name changed
+        new_character_dir = STORAGE_DIR / new_name.replace(' ', '_').lower()
+        if new_name != old_name:
+            if old_character_dir.exists():
+                shutil.move(str(old_character_dir), str(new_character_dir))
+                print(
+                    f"Renamed character directory from {old_character_dir} to {new_character_dir}")
+            else:
+                new_character_dir.mkdir(exist_ok=True)
+        else:
+            new_character_dir.mkdir(exist_ok=True)
+
+        # Initialize paths with existing values
+        image_path = character['image_path']
+        knowledge_base_path = character['knowledge_base_path']
+        voice_cloning_audio_path = character['voice_cloning_audio_path']
+        style_tuning_data_path = character['style_tuning_data_path']
+
+        # Handle file uploads (only update if new files are provided)
+        if 'character_image' in request.files:
+            image_file = request.files['character_image']
+            if image_file.filename:
+                # Delete old image if it exists
+                if image_path and os.path.exists(image_path):
+                    os.remove(image_path)
+
+                image_path = str(new_character_dir /
+                                 f"image_{image_file.filename}")
+                image_file.save(image_path)
+
+        # Update knowledge base if new file provided
+        if 'knowledge_base_file' in request.files:
+            kb_file = request.files['knowledge_base_file']
+            if kb_file.filename:
+                # Delete old knowledge base if it exists
+                if knowledge_base_path and os.path.exists(knowledge_base_path):
+                    os.remove(knowledge_base_path)
+
+                knowledge_base_path = str(
+                    new_character_dir / f"knowledge_base_{kb_file.filename}")
+                kb_file.save(knowledge_base_path)
+
+                # Process knowledge base documents
+                try:
+                    collection_name = f"{new_name.lower().replace(' ', '')}-knowledge"
+
+                    # Create temporary directories for processing
+                    kb_docs_dir = new_character_dir / "kb_docs"
+                    kb_archive_dir = new_character_dir / "kb_archive"
+                    kb_docs_dir.mkdir(exist_ok=True)
+                    kb_archive_dir.mkdir(exist_ok=True)
+
+                    # Copy the file to the docs directory for processing
+                    temp_kb_path = kb_docs_dir / kb_file.filename
+                    shutil.copy2(knowledge_base_path, temp_kb_path)
+
+                    # Process the documents
+                    process_documents_for_collection(
+                        str(kb_docs_dir), str(kb_archive_dir), collection_name)
+                except Exception as e:
+                    print(f"Warning: Knowledge base processing failed: {e}")
+
+        # Update voice cloning audio if new file provided
+        if 'voice_cloning_audio' in request.files:
+            voice_file = request.files['voice_cloning_audio']
+            if voice_file.filename:
+                # Delete old voice files if they exist
+                if voice_cloning_audio_path and os.path.exists(voice_cloning_audio_path):
+                    os.remove(voice_cloning_audio_path)
+
+                raw_audio_path = str(new_character_dir /
+                                     f"voice_raw_{voice_file.filename}")
+                voice_file.save(raw_audio_path)
+
+                # Check if audio preprocessing is enabled
+                preprocess_audio = voice_cloning_settings.get(
+                    'preprocess_audio', True)
+
+                if preprocess_audio:
+                    try:
+                        # Filter out TTS-only parameters
+                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'reference_text',
+                                           'language', 'output_dir', 'cuda_device', 'coqui_tos_agreed',
+                                           'torch_force_no_weights_only_load', 'auto_download'}
+                        audio_processing_params = {
+                            k: v for k, v in voice_cloning_settings.items()
+                            if k not in tts_only_params
+                        }
+                        voice_cloning_audio_path = generate_reference_audio(
+                            raw_audio_path,
+                            output_file=str(
+                                new_character_dir / "voice_processed.wav"),
+                            **audio_processing_params
+                        )
+                        print(f"Audio preprocessing completed for {new_name}")
+                    except Exception as e:
+                        print(f"Warning: Voice preprocessing failed: {e}")
+                        voice_cloning_audio_path = raw_audio_path
+                else:
+                    voice_cloning_audio_path = raw_audio_path
+
+        # Update style tuning data if new file provided
+        if 'style_tuning_file' in request.files:
+            style_file = request.files['style_tuning_file']
+            if style_file.filename:
+                # Delete old style tuning file if it exists
+                if style_tuning_data_path and os.path.exists(style_tuning_data_path):
+                    os.remove(style_tuning_data_path)
+
+                style_tuning_data_path = str(
+                    new_character_dir / f"style_tuning_{style_file.filename}")
+                style_file.save(style_tuning_data_path)
+
+                # Process style tuning data
+                try:
+                    collection_name = f"{new_name.lower().replace(' ', '')}-style"
+
+                    # Create temporary directories for processing
+                    style_docs_dir = new_character_dir / "style_docs"
+                    style_archive_dir = new_character_dir / "style_archive"
+                    style_docs_dir.mkdir(exist_ok=True)
+                    style_archive_dir.mkdir(exist_ok=True)
+
+                    # Copy the file to the docs directory for processing
+                    temp_style_path = style_docs_dir / style_file.filename
+                    shutil.copy2(style_tuning_data_path, temp_style_path)
+
+                    # Process the documents
+                    process_documents_for_collection(
+                        str(style_docs_dir), str(style_archive_dir), collection_name)
+                except Exception as e:
+                    print(f"Warning: Style tuning processing failed: {e}")
+
+        # Update paths if character directory was renamed
+        if new_name != old_name:
+            if image_path:
+                image_path = image_path.replace(old_name.replace(
+                    ' ', '_').lower(), new_name.replace(' ', '_').lower())
+            if knowledge_base_path:
+                knowledge_base_path = knowledge_base_path.replace(
+                    old_name.replace(' ', '_').lower(), new_name.replace(' ', '_').lower())
+            if voice_cloning_audio_path:
+                voice_cloning_audio_path = voice_cloning_audio_path.replace(
+                    old_name.replace(' ', '_').lower(), new_name.replace(' ', '_').lower())
+            if style_tuning_data_path:
+                style_tuning_data_path = style_tuning_data_path.replace(
+                    old_name.replace(' ', '_').lower(), new_name.replace(' ', '_').lower())
+
+        # Update database
+        cur.execute("""
+            UPDATE characters 
+            SET name = %s, image_path = %s, llm_model = %s, llm_config = %s, 
+                knowledge_base_path = %s, voice_cloning_audio_path = %s, 
+                voice_cloning_reference_text = %s, voice_cloning_settings = %s, 
+                style_tuning_data_path = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (
+            new_name, image_path, llm_model, json.dumps(llm_config),
+            knowledge_base_path, voice_cloning_audio_path, voice_reference_text,
+            json.dumps(
+                voice_cloning_settings), style_tuning_data_path, character_id
+        ))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": f"Character updated successfully",
+            "character_id": character_id,
+            "character_name": new_name,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-system-performance', methods=['GET'])
+def get_system_performance():
+    """
+    Get comprehensive system performance information including STT and TTS models.
+    """
+    try:
+        # Get TTS performance info
+        from libraries.tts.inference import get_device_performance_info
+        tts_info = get_device_performance_info()
+
+        # Get STT performance info
+        stt_info = get_stt_performance_info()
+
+        # Get general system info
+        system_info = {
+            "device_optimization_available": DEVICE_OPTIMIZATION_AVAILABLE,
+            "startup_time": time.time() - _startup_time if '_startup_time' in globals() else None,
+        }
+
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            device_type, device_info = get_device_info()
+            system_info.update({
+                "device_type": device_type.value,
+                "device_info": device_info,
+            })
+
+        return jsonify({
+            "system": system_info,
+            "tts": tts_info,
+            "stt": stt_info,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/preload-models', methods=['POST'])
+def preload_models_endpoint():
+    """
+    Preload models for optimal performance.
+    Expects: {"models": ["stt", "tts"], "tts_models": ["f5tts", "xtts"]}
+    """
+    try:
+        data = request.get_json()
+        models_to_load = data.get('models', ['stt', 'tts'])
+        tts_models = data.get('tts_models', ['f5tts'])
+
+        results = {
+            "loaded": [],
+            "failed": [],
+            "status": "success"
+        }
+
+        # Preload STT model
+        if 'stt' in models_to_load:
+            try:
+                print("🎙️  Preloading STT (Whisper) model...")
+                _get_whisper_model()  # This will load the optimal model
+                results["loaded"].append("stt")
+                print("✓ STT model preloaded successfully")
+            except Exception as e:
+                print(f"✗ Failed to preload STT model: {e}")
+                results["failed"].append({"model": "stt", "error": str(e)})
+
+        # Preload TTS models
+        if 'tts' in models_to_load:
+            try:
+                print("🔊 Preloading TTS models...")
+                from libraries.tts.inference import preload_models_smart
+                preload_models_smart(tts_models, force_reload=False)
+                results["loaded"].append("tts")
+                print("✓ TTS models preloaded successfully")
+            except Exception as e:
+                print(f"✗ Failed to preload TTS models: {e}")
+                results["failed"].append({"model": "tts", "error": str(e)})
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/unload-all-models-comprehensive', methods=['POST'])
+def unload_all_models_comprehensive():
+    """
+    Unload all models (STT, TTS, and LLM) from memory with comprehensive cleanup.
+    """
+    try:
+        print("🧹 Starting comprehensive model cleanup...")
+
+        # Unload STT model
+        _unload_stt_model()
+
+        # Unload TTS models
+        from libraries.tts.inference import unload_models
+        unload_models()
+
+        # Unload LLM models
+        from libraries.llm.inference import unload_all_cached_models
+        unload_all_cached_models()
+
+        # Clear global model cache
+        global model_cache
+        model_cache.clear()
+
+        # Final memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("✓ Final CUDA cache cleared and synchronized")
+
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+                print("✓ Final MPS cache cleared")
+            except:
+                pass
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+        print("✓ Final garbage collection completed")
+
+        print("🎯 Comprehensive model cleanup completed!")
+
+        return jsonify({
+            "message": "All models (STT, TTS, and LLM) unloaded from memory",
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/optimize-for-character', methods=['POST'])
+def optimize_for_character():
+    """
+    Optimize system for a specific character by preloading only necessary models.
+    Expects: {"character_id": int, "preload_stt": bool}
+    """
+    try:
+        data = request.get_json()
+        character_id = data.get('character_id')
+        preload_stt = data.get('preload_stt', True)
+
+        if not character_id:
+            return jsonify({"error": "character_id is required"}), 400
+
+        # Get character data
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM characters WHERE id = %s", (character_id,))
+        character = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not character:
+            return jsonify({"error": "Character not found"}), 404
+
+        character_name = character['name']
+        print(f"🎯 Optimizing system for character: {character_name}")
+
+        # First, unload all models to start fresh
+        print("🧹 Clearing existing models...")
+        _unload_stt_model()
+        from libraries.tts.inference import unload_models
+        unload_models()
+
+        # Preload STT model if requested
+        if preload_stt:
+            try:
+                print("🎙️  Preloading STT model for character...")
+                _get_whisper_model()
+                print("✓ STT model optimized for character")
+            except Exception as e:
+                print(f"Warning: STT preload failed: {e}")
+
+        # Preload character-specific models directly
+        try:
+            print(f"🔄 Loading models for character {character_name}...")
+
+            # Load LLM model for this character
+            if character['llm_model'] and character['llm_config']:
+                from libraries.llm.inference import preload_llm_model, ModelType
+
+                llm_config = character['llm_config']
+                llm_cache_key = f"{character_name}_llm"
+
+                # Determine model type
+                if 'api_key' in llm_config:
+                    model_type = ModelType.OPENAI_API
+                elif character['llm_model'].endswith('.gguf'):
+                    model_type = ModelType.GGUF
+                else:
+                    model_type = ModelType.HUGGINGFACE
+
+                model = preload_llm_model(
+                    model_type=model_type,
+                    model_config={
+                        'model_path': character['llm_model'],
+                        **llm_config
+                    },
+                    cache_key=llm_cache_key
+                )
+                model_cache[llm_cache_key] = model
+                print(f"✓ LLM model preloaded for {character_name}")
+
+            # Load TTS model for this character
+            if character['voice_cloning_settings']:
+                from libraries.tts.inference import preload_models_smart, ensure_model_available
+
+                voice_settings = character['voice_cloning_settings']
+                tts_model = voice_settings.get('model', 'f5tts')
+
+                success = ensure_model_available(tts_model)
+                if success:
+                    preload_models_smart([tts_model])
+                    print(
+                        f"✓ TTS model {tts_model} preloaded for {character_name}")
+
+        except Exception as e:
+            print(f"Warning: Character model loading failed: {e}")
+
+        return jsonify({
+            "message": f"System optimized for character {character_name}",
+            "character_id": character_id,
+            "character_name": character_name,
+            "optimizations": {
+                "stt_preloaded": preload_stt,
+                "tts_preloaded": True,
+                "llm_preloaded": True,
+            },
             "status": "success"
         }), 200
 

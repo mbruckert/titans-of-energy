@@ -5,6 +5,7 @@ This module handles querying ChromaDB collections using OpenAI embeddings
 and formatting results for context retrieval.
 """
 
+from openai import OpenAI
 import json
 import os
 from typing import Dict, List, Optional
@@ -24,8 +25,34 @@ if not OPENAI_API_KEY:
 CHROMA_DB_PATH = "./chroma_db"
 EMBEDDING_MODEL = "text-embedding-ada-002"
 
-# Initialize OpenAI embedding function
-openai_embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+# Import new OpenAI client for embeddings
+
+# Initialize OpenAI client
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Custom embedding function that uses new OpenAI API
+
+
+class CustomOpenAIEmbeddingFunction:
+    def __init__(self, api_key: str, model_name: str = "text-embedding-ada-002"):
+        self.client = OpenAI(api_key=api_key)
+        self.model_name = model_name
+
+    def __call__(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a list of texts using the new OpenAI API."""
+        try:
+            response = self.client.embeddings.create(
+                input=texts,
+                model=self.model_name
+            )
+            return [data.embedding for data in response.data]
+        except Exception as e:
+            print(f"Error generating embeddings: {e}")
+            raise
+
+
+# Initialize custom OpenAI embedding function
+openai_embedding_function = CustomOpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY,
     model_name=EMBEDDING_MODEL
 )
