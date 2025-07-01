@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   db:
     image: postgres:14
@@ -17,6 +19,9 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
       args:
         ENABLE_GPU: ${ENABLE_GPU:-auto} # Can be overridden with environment variable
     depends_on:
