@@ -167,22 +167,24 @@ def _get_f5tts_model(force_init: bool = False):
             else:
                 device_str = "cuda" if torch.cuda.is_available() else "cpu"
 
-            # Initialize F5TTS with basic device setting
-            # Note: F5TTS API may not support advanced parameters like low_memory, precision
-            try:
-                # Try with device parameter first
-                _f5tts_model = F5TTS(device=device_str)
-            except TypeError:
-                # Fallback: try without device parameter if not supported
-                try:
-                    _f5tts_model = F5TTS()
-                    # Manually move to device if model supports it
-                    if hasattr(_f5tts_model, 'to'):
-                        _f5tts_model = _f5tts_model.to(device_str)
-                except Exception as fallback_error:
-                    print(
-                        f"Warning: Could not initialize F5TTS with device optimization: {fallback_error}")
-                    _f5tts_model = F5TTS()  # Use default initialization
+            # Initialize F5TTS with device-specific settings
+            model_kwargs = {"device": device_str}
+
+            # Add device-specific model parameters
+            if device_type == DeviceType.APPLE_SILICON:
+                # Conservative settings for Apple Silicon
+                model_kwargs.update({
+                    "low_memory": not device_info.get('is_high_end', False),
+                    "precision": "float32",  # Apple Silicon works better with FP32
+                })
+            elif device_type == DeviceType.NVIDIA_GPU:
+                # Aggressive settings for NVIDIA GPUs
+                model_kwargs.update({
+                    "low_memory": device_info.get('memory_gb', 8) < 12,
+                    "precision": "float16" if _mixed_precision_enabled else "float32",
+                })
+
+            _f5tts_model = F5TTS(**model_kwargs)
 
             # Apply device-specific optimizations
             if device_type == DeviceType.APPLE_SILICON:
@@ -483,25 +485,32 @@ def _generate_f5tts(
         except Exception as e:
             print(f"Warning: Could not validate audio/text lengths: {e}")
 
-        # Prepare basic generation parameters (only use supported F5TTS parameters)
+        # Prepare generation parameters with device optimization
         generation_params = {
             'ref_file': ref_audio,
             'ref_text': ref_text,
             'gen_text': gen_text,
             'file_wave': output_file,
+            'seed': config.get('seed', None),
             'remove_silence': config.get('remove_silence', True),
         }
 
-        # Add seed only if specified (some versions may not support it)
-        if config.get('seed') is not None:
-            generation_params['seed'] = config.get('seed')
+        # Add device-specific parameters
+        if device_type == DeviceType.APPLE_SILICON:
+            # Apple Silicon optimizations
+            generation_params.update({
+                'batch_size': min(config.get('batch_size', 2), 2),
+                'use_mps': config.get('use_mps', _mps_available),
+            })
+        elif device_type == DeviceType.NVIDIA_GPU:
+            # NVIDIA GPU optimizations
+            generation_params.update({
+                'batch_size': config.get('batch_size', 4),
+                'use_mixed_precision': config.get('use_mixed_precision', _mixed_precision_enabled),
+            })
 
-        # Note: Removed device-specific parameters like use_mps, use_mixed_precision, batch_size
-        # as they may not be supported by the current F5TTS API
-        print(f"F5TTS generation parameters: {list(generation_params.keys())}")
-
-        # Use autocast for mixed precision on NVIDIA GPUs with retry logic for parameter and tensor issues
-        max_retries = 3
+        # Use autocast for mixed precision on NVIDIA GPUs with retry logic for tensor mismatches
+        max_retries = 2
         for attempt in range(max_retries + 1):
             try:
                 if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
@@ -510,32 +519,6 @@ def _generate_f5tts(
                 else:
                     wav, sr, spec = f5tts_model.infer(**generation_params)
                 break  # Success, exit retry loop
-            except TypeError as e:
-                # Handle unsupported parameter errors
-                error_msg = str(e)
-                if "unexpected keyword argument" in error_msg and attempt < max_retries:
-                    print(
-                        f"⚠️  Unsupported parameter (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
-                    print("🔄 Trying with reduced parameters...")
-
-                    # Try removing potentially unsupported parameters
-                    if attempt == 0 and 'seed' in generation_params:
-                        del generation_params['seed']
-                        print("   • Removed seed parameter")
-                    elif attempt == 1 and 'remove_silence' in generation_params:
-                        del generation_params['remove_silence']
-                        print("   • Removed remove_silence parameter")
-                    elif attempt == 2:
-                        # Last resort: use only the most basic parameters
-                        generation_params = {
-                            'ref_file': ref_audio,
-                            'ref_text': ref_text,
-                            'gen_text': gen_text,
-                            'file_wave': output_file,
-                        }
-                        print("   • Using only basic parameters")
-                else:
-                    raise e
             except Exception as e:
                 error_msg = str(e)
                 if "Sizes of tensors must match" in error_msg and attempt < max_retries:
@@ -544,14 +527,16 @@ def _generate_f5tts(
                     print("🔄 Trying with adjusted parameters...")
 
                     # Try with different parameters to fix tensor mismatch
-                    if 'remove_silence' in generation_params:
+                    if attempt == 0:
+                        # First retry: disable silence removal which can cause length mismatches
                         generation_params['remove_silence'] = False
                         print("   • Disabled silence removal")
-                    elif 'seed' not in generation_params:
+                    elif attempt == 1:
+                        # Second retry: try with a different seed to change internal processing
                         generation_params['seed'] = 42
-                        print("   • Added fixed seed")
+                        print("   • Using fixed seed")
                 else:
-                    # Either not a recoverable error, or we've exhausted retries
+                    # Either not a tensor mismatch error, or we've exhausted retries
                     raise e
 
         runtime = time.perf_counter() - start_time
