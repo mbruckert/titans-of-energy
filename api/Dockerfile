@@ -142,7 +142,7 @@ RUN chmod +x /tmp/setup_llama_env.sh \
  && rm /tmp/setup_llama_env.sh
 
 # 9) Install Python dependencies with optimizations
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --ignore-installed -r requirements.txt
 
 # 10) Install additional TTS/STT optimization dependencies
 RUN pip3 install --no-cache-dir \
