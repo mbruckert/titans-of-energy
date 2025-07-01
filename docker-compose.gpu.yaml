@@ -2,8 +2,6 @@
 # Use this file only on systems with NVIDIA GPUs and Docker GPU runtime
 # Usage: docker-compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
 
-version: "3.8"
-
 services:
   app:
     # Enable GPU access for NVIDIA GPUs

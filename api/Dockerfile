@@ -142,10 +142,11 @@ RUN chmod +x /tmp/setup_llama_env.sh \
  && rm /tmp/setup_llama_env.sh
 
 # 9) Install Python dependencies with optimizations
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Handle potential package conflicts (like blinker distutils issue)
+RUN pip3 install --no-cache-dir --ignore-installed -r requirements.txt
 
 # 10) Install additional TTS/STT optimization dependencies
-RUN pip3 install --no-cache-dir \
+RUN pip3 install --no-cache-dir --ignore-installed \
     # Advanced Whisper for better STT performance
     openai-whisper \
     # Faster whisper implementation
@@ -163,7 +164,7 @@ RUN pip3 install --no-cache-dir \
 # 11) Install platform-specific optimizations
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
       # Apple Silicon specific packages
-      pip3 install --no-cache-dir coremltools || echo "CoreML not available, skipping"; \
+      pip3 install --no-cache-dir --ignore-installed coremltools || echo "CoreML not available, skipping"; \
     else \
       # x86_64 specific packages
       echo "x86_64 platform - no additional packages needed"; \
