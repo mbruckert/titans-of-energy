@@ -1,9 +1,11 @@
-# Multi-stage optimized Dockerfile for STT/TTS performance on both Apple Silicon and NVIDIA GPUs
+# Multi-platform optimized Dockerfile for Apple Silicon, NVIDIA GPUs, and CPU
+# Automatically detects build platform and optimizes accordingly
 FROM ubuntu:22.04
 
-# NOTE: This Dockerfile is optimized for building on ARM64 (Apple Silicon) and x86_64 architectures
-# The compilation flags are specifically tuned to avoid conflicts with ggml/llama-cpp-python
-# while still providing good performance for TTS/STT workloads
+# Build arguments for platform detection and optimization
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG ENABLE_GPU=auto
 
 # Set environment variables for performance optimization
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -12,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 1) Install system dependencies with optimizations
+# 1) Install base system dependencies
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       # Build essentials
@@ -20,6 +22,8 @@ RUN apt-get update \
       cmake \
       ninja-build \
       pkg-config \
+      # Platform detection tools
+      lsb-release \
       # Audio and video processing
       ffmpeg \
       libavcodec-dev \
@@ -54,43 +58,93 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
-# 2) Upgrade pip and install foundational packages
+# 2) Platform-specific setup
+RUN echo "Build platform: $BUILDPLATFORM" \
+ && echo "Target platform: $TARGETPLATFORM" \
+ && echo "GPU setting: $ENABLE_GPU"
+
+# 2.1) Install NVIDIA CUDA toolkit for x86_64 platforms when GPU is enabled
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$ENABLE_GPU" != "false" ]; then \
+      echo "Installing CUDA toolkit for x86_64/NVIDIA GPU support..." \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+           gnupg \
+           software-properties-common \
+      && wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb \
+      && dpkg -i cuda-keyring_1.0-1_all.deb \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+           cuda-toolkit-12-1 \
+      && rm -rf /var/lib/apt/lists/* \
+      && apt-get clean \
+      && rm cuda-keyring_1.0-1_all.deb \
+      && echo "CUDA toolkit installed for x86_64"; \
+    else \
+      echo "Skipping CUDA installation (not x86_64 or GPU disabled)"; \
+    fi
+
+# 2.2) Install Apple Silicon optimizations for ARM64 platforms
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+      echo "Setting up ARM64/Apple Silicon optimizations..." \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+           # ARM64 specific optimizations
+           libblas64-dev \
+           liblapack64-dev \
+      && rm -rf /var/lib/apt/lists/* \
+      && apt-get clean \
+      && echo "ARM64 optimizations installed"; \
+    else \
+      echo "Skipping ARM64 optimizations (not ARM64 platform)"; \
+    fi
+
+# 3) Upgrade pip and install foundational packages
 RUN pip3 install --upgrade pip setuptools wheel
 
-# 3) Install numpy and scipy with optimizations first
+# 4) Install numpy and scipy with platform optimizations
 RUN pip3 install --no-cache-dir \
     numpy \
     scipy \
     cython
 
-# 4) Set compilation flags for optimal performance
-# These flags optimize for both x86_64 and ARM64 (Apple Silicon when building)
-# Removed -ffast-math as it conflicts with ggml compilation
-ENV CFLAGS="-O3 -fPIC -fno-finite-math-only" \
-    CXXFLAGS="-O3 -fPIC -fno-finite-math-only" \
-    LDFLAGS="-Wl,-O1 -Wl,--as-needed" \
-    MAKEFLAGS="-j$(nproc)"
+# 5) Set platform-specific compilation flags
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+      # Apple Silicon / ARM64 optimizations - conservative flags to avoid conflicts
+      export CFLAGS="-O2 -fPIC -mcpu=native" \
+      && export CXXFLAGS="-O2 -fPIC -mcpu=native" \
+      && export LDFLAGS="-Wl,-O1 -Wl,--as-needed" \
+      && echo "Set ARM64 compilation flags"; \
+    else \
+      # x86_64 optimizations
+      export CFLAGS="-O3 -fPIC -march=native -fno-finite-math-only" \
+      && export CXXFLAGS="-O3 -fPIC -march=native -fno-finite-math-only" \
+      && export LDFLAGS="-Wl,-O1 -Wl,--as-needed" \
+      && echo "Set x86_64 compilation flags"; \
+    fi
 
-# 5) Install PyTorch with device detection
-# Use CPU version for better compatibility across architectures
-RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Store the flags in environment for later use
+ENV MAKEFLAGS="-j$(nproc)"
 
-# 6) Create working directory and copy requirements
+# 6) Install PyTorch with platform-specific optimizations
+COPY install_pytorch.sh /tmp/install_pytorch.sh
+RUN chmod +x /tmp/install_pytorch.sh \
+ && /tmp/install_pytorch.sh "$TARGETPLATFORM" "$ENABLE_GPU" \
+ && rm /tmp/install_pytorch.sh
+
+# 7) Create working directory and copy requirements
 WORKDIR /app
 COPY requirements.txt .
 
-# Set environment variables for llama-cpp-python compilation
-# Disable all advanced features that can cause ARM64 build issues
-ENV CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_BACKEND_DL=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF" \
-    FORCE_CMAKE=1 \
-    LLAMA_CPP_LIB_CUDA=0 \
-    LLAMA_CPP_FORCE_CPU=1 \
-    LLAMA_CPP_BACKEND=OFF
+# 8) Set platform-specific environment variables for llama-cpp-python
+COPY setup_llama_env.sh /tmp/setup_llama_env.sh
+RUN chmod +x /tmp/setup_llama_env.sh \
+ && /tmp/setup_llama_env.sh "$TARGETPLATFORM" "$ENABLE_GPU" \
+ && rm /tmp/setup_llama_env.sh
 
-# 7) Install Python dependencies with optimizations
+# 9) Install Python dependencies with optimizations
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# 8) Install additional TTS/STT optimization dependencies
+# 10) Install additional TTS/STT optimization dependencies
 RUN pip3 install --no-cache-dir \
     # Advanced Whisper for better STT performance
     openai-whisper \
@@ -104,51 +158,50 @@ RUN pip3 install --no-cache-dir \
     accelerate \
     optimum \
     # Memory optimization
-    psutil \
-    # Apple Silicon optimizations (will be ignored on non-Apple hardware)
-    coremltools || true
+    psutil
 
-# 9) Install spaCy model for NLP processing
+# 11) Install platform-specific optimizations
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+      # Apple Silicon specific packages
+      pip3 install --no-cache-dir coremltools || echo "CoreML not available, skipping"; \
+    else \
+      # x86_64 specific packages
+      echo "x86_64 platform - no additional packages needed"; \
+    fi
+
+# 12) Install spaCy model for NLP processing
 RUN python3 -m spacy download en_core_web_sm
 
-# 10) Copy application code
+# 13) Copy application code
 COPY . .
 
-# 11) Create directories for persistent volumes with optimized permissions
+# 14) Create directories for persistent volumes with optimized permissions
 RUN mkdir -p /app/chroma_db /app/storage /app/outputs /app/cache \
  && chmod 755 /app/chroma_db /app/storage /app/outputs /app/cache \
  && chown -R 1000:1000 /app
 
-# 12) Set environment variables for runtime optimization
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    # PyTorch optimizations
-    TORCH_CUDNN_V8_API_ENABLED=1 \
-    CUDA_LAUNCH_BLOCKING=0 \
-    # OpenMP optimizations
-    OMP_NUM_THREADS=8 \
-    MKL_NUM_THREADS=8 \
-    # Cache directories
-    HF_HOME=/app/cache/huggingface \
-    TORCH_HOME=/app/cache/torch \
-    WHISPER_CACHE_DIR=/app/cache/whisper \
-    # Default Postgres connection settings (compose will override)
-    PGHOST=db \
-    PGPORT=5432 \
-    PGUSER=myuser \
-    PGPASSWORD=mypassword \
-    PGDATABASE=mydb
+# 15) Set platform-specific runtime environment variables
+COPY set_runtime_env.sh /tmp/set_runtime_env.sh
+RUN chmod +x /tmp/set_runtime_env.sh \
+ && /tmp/set_runtime_env.sh "$TARGETPLATFORM" "$ENABLE_GPU" > /app/platform_env.sh \
+ && rm /tmp/set_runtime_env.sh
 
-# 13) Create cache directories
+# 16) Create cache directories
 RUN mkdir -p /app/cache/huggingface /app/cache/torch /app/cache/whisper \
  && chmod 755 /app/cache/huggingface /app/cache/torch /app/cache/whisper
 
-# 14) Expose port
+# 17) Expose port
 EXPOSE 5000
 
-# 15) Add healthcheck for better container management
+# 18) Add healthcheck for better container management
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:5000/ || exit 1
 
-# 16) Use exec form for better signal handling
-CMD ["python3", "app.py"]
+# 19) Create startup script that sources platform environment
+RUN echo '#!/bin/bash' > /app/start.sh \
+ && echo 'source /app/platform_env.sh' >> /app/start.sh \
+ && echo 'exec python3 app.py' >> /app/start.sh \
+ && chmod +x /app/start.sh
+
+# 20) Use startup script for better platform detection
+CMD ["/app/start.sh"]
