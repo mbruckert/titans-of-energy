@@ -569,6 +569,7 @@ def init_db():
             bot_response TEXT NOT NULL,
             audio_base64 TEXT,
             knowledge_context TEXT,
+            knowledge_references JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -580,6 +581,16 @@ def init_db():
             ADD COLUMN IF NOT EXISTS voice_cloning_reference_text TEXT
         """)
         print("Added voice_cloning_reference_text column (if not exists)")
+    except Exception as e:
+        print(f"Migration note: {e}")
+
+    # Add knowledge_references column if it doesn't exist (migration)
+    try:
+        cur.execute("""
+            ALTER TABLE chat_history 
+            ADD COLUMN IF NOT EXISTS knowledge_references JSONB
+        """)
+        print("Added knowledge_references column (if not exists)")
     except Exception as e:
         print(f"Migration note: {e}")
 
@@ -1062,10 +1073,18 @@ def ask_question_text():
 
         # Search knowledge base
         knowledge_context = ""
+        knowledge_references = []
         try:
             kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-            knowledge_context = query_collection(
-                kb_collection, question, n_results=3)
+            kb_result = query_collection(
+                kb_collection, question, n_results=3, return_structured=True)
+
+            if isinstance(kb_result, dict) and "references" in kb_result:
+                knowledge_context = kb_result.get("context", "")
+                knowledge_references = kb_result.get("references", [])
+            else:
+                # Fallback to string format for backward compatibility
+                knowledge_context = str(kb_result)
         except Exception as e:
             print(f"Knowledge base search failed: {e}")
 
@@ -1129,18 +1148,35 @@ def ask_question_text():
         try:
             cur.execute("""
                 INSERT INTO chat_history 
-                (character_id, user_message, bot_response, audio_base64, knowledge_context)
-                VALUES (%s, %s, %s, %s, %s)
+                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 character_id,
                 question,
                 styled_response,
                 audio_base64,
-                knowledge_context
+                knowledge_context,
+                json.dumps(knowledge_references)  # Store as JSON
             ))
             conn.commit()
         except Exception as e:
             print(f"Failed to store chat history: {e}")
+            # Try without knowledge_references column for backward compatibility
+            try:
+                cur.execute("""
+                    INSERT INTO chat_history 
+                    (character_id, user_message, bot_response, audio_base64, knowledge_context)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    character_id,
+                    question,
+                    styled_response,
+                    audio_base64,
+                    knowledge_context
+                ))
+                conn.commit()
+            except Exception as e2:
+                print(f"Failed to store chat history (fallback): {e2}")
 
         cur.close()
         conn.close()
@@ -1150,6 +1186,7 @@ def ask_question_text():
             "text_response": styled_response,
             "audio_base64": audio_base64,
             "knowledge_context": knowledge_context,
+            "knowledge_references": knowledge_references,
             "character_name": character_name,
             "status": "success"
         }), 200
@@ -1270,10 +1307,18 @@ def ask_question_audio():
 
         # Search knowledge base
         knowledge_context = ""
+        knowledge_references = []
         try:
             kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-            knowledge_context = query_collection(
-                kb_collection, question, n_results=3)
+            kb_result = query_collection(
+                kb_collection, question, n_results=3, return_structured=True)
+
+            if isinstance(kb_result, dict) and "references" in kb_result:
+                knowledge_context = kb_result.get("context", "")
+                knowledge_references = kb_result.get("references", [])
+            else:
+                # Fallback to string format for backward compatibility
+                knowledge_context = str(kb_result)
         except Exception as e:
             print(f"Knowledge base search failed: {e}")
 
@@ -1337,18 +1382,35 @@ def ask_question_audio():
         try:
             cur.execute("""
                 INSERT INTO chat_history 
-                (character_id, user_message, bot_response, audio_base64, knowledge_context)
-                VALUES (%s, %s, %s, %s, %s)
+                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 character_id,
                 question,
                 styled_response,
                 audio_base64,
-                knowledge_context
+                knowledge_context,
+                json.dumps(knowledge_references)  # Store as JSON
             ))
             conn.commit()
         except Exception as e:
             print(f"Failed to store chat history: {e}")
+            # Try without knowledge_references column for backward compatibility
+            try:
+                cur.execute("""
+                    INSERT INTO chat_history 
+                    (character_id, user_message, bot_response, audio_base64, knowledge_context)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    character_id,
+                    question,
+                    styled_response,
+                    audio_base64,
+                    knowledge_context
+                ))
+                conn.commit()
+            except Exception as e2:
+                print(f"Failed to store chat history (fallback): {e2}")
 
         cur.close()
         conn.close()
@@ -1359,6 +1421,7 @@ def ask_question_audio():
             "text_response": styled_response,
             "audio_base64": audio_base64,
             "knowledge_context": knowledge_context,
+            "knowledge_references": knowledge_references,
             "character_name": character_name,
             "status": "success"
         }), 200
@@ -1662,7 +1725,7 @@ def get_chat_history(character_id):
 
         # Get chat history
         cur.execute("""
-            SELECT id, user_message, bot_response, audio_base64, knowledge_context, created_at
+            SELECT id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references, created_at
             FROM chat_history 
             WHERE character_id = %s 
             ORDER BY created_at DESC 
@@ -1679,6 +1742,17 @@ def get_chat_history(character_id):
             entry_dict = dict(entry)
             # Convert datetime to string
             entry_dict['created_at'] = entry_dict['created_at'].isoformat()
+
+            # Parse knowledge_references from JSON if available
+            if entry_dict.get('knowledge_references'):
+                try:
+                    entry_dict['knowledge_references'] = json.loads(
+                        entry_dict['knowledge_references'])
+                except (json.JSONDecodeError, TypeError):
+                    entry_dict['knowledge_references'] = []
+            else:
+                entry_dict['knowledge_references'] = []
+
             result.append(entry_dict)
 
         return jsonify({

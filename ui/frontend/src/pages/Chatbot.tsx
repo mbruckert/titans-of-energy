@@ -1,8 +1,19 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useVoiceToText } from "react-speakup";
-import { Mic, MicOff, Volume2, VolumeX, Play, Pause, Trash2 } from "lucide-react";
+import { Mic, MicOff, Volume2, VolumeX, Play, Pause, Trash2, ChevronDown, ChevronUp, BookOpen, Search } from "lucide-react";
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+
+interface KnowledgeReference {
+    id: number;
+    content: string;
+    source: string;
+    chunk_id?: number;
+    keywords: string[];
+    entities: string[];
+    type: string;
+    relevance_score?: number;
+}
 
 interface Message {
     text: string;
@@ -10,6 +21,7 @@ interface Message {
     timestamp: Date;
     audioBase64?: string;
     id?: number;
+    knowledgeReferences?: KnowledgeReference[];
 }
 
 const Chatbot = () => {
@@ -27,6 +39,7 @@ const Chatbot = () => {
     const [isPlaying, setIsPlaying] = useState(false);
     const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
     const [autoPlayAudio, setAutoPlayAudio] = useState(true);
+    const [expandedReferences, setExpandedReferences] = useState<Set<number>>(new Set());
 
     // Get character data from location state
     const characterId = location.state?.characterId;
@@ -112,7 +125,8 @@ const Chatbot = () => {
                             isUser: false,
                             timestamp: new Date(entry.created_at),
                             audioBase64: entry.audio_base64,
-                            id: entry.id
+                            id: entry.id,
+                            knowledgeReferences: entry.knowledge_references || []
                         });
                     });
                     setMessages(historyMessages);
@@ -191,6 +205,7 @@ const Chatbot = () => {
                     isUser: false,
                     timestamp: new Date(),
                     audioBase64: data.audio_base64,
+                    knowledgeReferences: data.knowledge_references || [],
                 };
                 
                 // Debug logging for audio issues
@@ -351,6 +366,80 @@ const Chatbot = () => {
             setError("Microphone access denied. Please allow microphone access to use voice input.");
             setIsListening(false);
         }
+    };
+
+    // Component for displaying knowledge references
+    const KnowledgeReferences: React.FC<{ references: KnowledgeReference[], messageIndex: number }> = ({ references, messageIndex }) => {
+        if (!references || references.length === 0) return null;
+
+        const isExpanded = expandedReferences.has(messageIndex);
+
+        const toggleExpanded = () => {
+            const newExpanded = new Set(expandedReferences);
+            if (isExpanded) {
+                newExpanded.delete(messageIndex);
+            } else {
+                newExpanded.add(messageIndex);
+            }
+            setExpandedReferences(newExpanded);
+        };
+
+        return (
+            <div className="mt-3 border-t border-gray-200 pt-2">
+                <button
+                    onClick={toggleExpanded}
+                    className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+                >
+                    <BookOpen size={14} />
+                    <span>{references.length} source{references.length > 1 ? 's' : ''} referenced</span>
+                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+                
+                {isExpanded && (
+                    <div className="mt-2 space-y-2 max-h-60 overflow-y-auto">
+                        {references.map((ref, index) => (
+                            <div key={ref.id} className="bg-gray-50 rounded-lg p-3 text-sm border border-gray-200">
+                                <div className="flex items-start justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <Search size={12} className="text-gray-500 mt-0.5" />
+                                        <span className="font-medium text-gray-700">
+                                            {ref.source || `Source ${ref.id}`}
+                                        </span>
+                                        {ref.relevance_score && (
+                                            <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs">
+                                                {ref.relevance_score}% match
+                                            </span>
+                                        )}
+                                    </div>
+                                    <span className="text-xs text-gray-500 capitalize">
+                                        {ref.type}
+                                    </span>
+                                </div>
+                                
+                                <p className="text-gray-700 mb-2 line-clamp-3">
+                                    {ref.content}
+                                </p>
+                                
+                                {(ref.keywords.length > 0 || ref.entities.length > 0) && (
+                                    <div className="flex flex-wrap gap-1">
+                                        {ref.keywords.slice(0, 3).map((keyword, kidx) => keyword && (
+                                            <span key={kidx} className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">
+                                                {keyword}
+                                            </span>
+                                        ))}
+                                        {ref.entities.slice(0, 2).map((entity, eidx) => entity && (
+                                            <span key={eidx} className="px-2 py-1 bg-purple-100 text-purple-700 rounded-full text-xs">
+                                                {entity}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
     };
 
     // Redirect if no character selected
@@ -529,6 +618,9 @@ const Chatbot = () => {
                                         </div>
                                     )}
                                 </div>
+                                {message.knowledgeReferences && (
+                                    <KnowledgeReferences references={message.knowledgeReferences} messageIndex={index} />
+                                )}
                             </div>
                         </div>
                     ))

@@ -8,7 +8,7 @@ and formatting results for context retrieval.
 from openai import OpenAI
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import chromadb
 import chromadb.utils.embedding_functions as embedding_functions
@@ -66,10 +66,11 @@ def query_collection(
     query: str,
     n_results: int = 2,
     include_metadata: bool = True,
-    verbose: bool = False
-) -> str:
+    verbose: bool = False,
+    return_structured: bool = False
+) -> Union[str, Dict]:
     """
-    Query a ChromaDB collection and return formatted context.
+    Query a ChromaDB collection and return formatted context or structured data.
 
     Args:
         collection_name: Name of the ChromaDB collection to query
@@ -77,9 +78,10 @@ def query_collection(
         n_results: Number of results to return (default: 2)
         include_metadata: Whether to include metadata in results (default: True)
         verbose: Whether to print debug information (default: False)
+        return_structured: Whether to return structured data instead of formatted string (default: False)
 
     Returns:
-        Formatted context string containing query results
+        Formatted context string or structured dictionary containing query results
 
     Raises:
         Exception: If collection doesn't exist or query fails
@@ -97,7 +99,7 @@ def query_collection(
             print(f"Query embedding vector length: {len(query_embedding[0])}")
 
         # Perform similarity search
-        include_fields = ['documents']
+        include_fields = ['documents', 'distances']
         if include_metadata:
             include_fields.append('metadatas')
 
@@ -107,13 +109,20 @@ def query_collection(
             include=include_fields
         )
 
-        # Format results
-        return _format_query_results(results, include_metadata, verbose)
+        # Return structured data if requested
+        if return_structured:
+            return _format_structured_results(results, include_metadata, verbose)
+        else:
+            # Format results as string (backward compatibility)
+            return _format_query_results(results, include_metadata, verbose)
 
     except Exception as e:
         error_msg = f"Error querying collection '{collection_name}': {e}"
         print(error_msg)
-        return f"Query failed: {error_msg}"
+        if return_structured:
+            return {"error": error_msg, "references": []}
+        else:
+            return f"Query failed: {error_msg}"
 
 
 def _format_query_results(
@@ -158,6 +167,78 @@ def _format_query_results(
                 context_parts.append("")  # Empty line for readability
 
     return "\n".join(context_parts).strip()
+
+
+def _format_structured_results(
+    results: Dict,
+    include_metadata: bool = True,
+    verbose: bool = False
+) -> Dict:
+    """
+    Format ChromaDB query results into structured data for UI display.
+
+    Args:
+        results: Raw results from ChromaDB query
+        include_metadata: Whether to include metadata in formatting
+        verbose: Whether to include debug information
+
+    Returns:
+        Dictionary with formatted context and references
+    """
+    if not results.get('documents') or not results['documents'][0]:
+        return {
+            "context": "No relevant context found.",
+            "references": []
+        }
+
+    documents = results['documents'][0]
+    metadatas = results.get('metadatas', [None])[
+        0] if include_metadata else None
+    distances = results.get('distances', [None])[
+        0] if 'distances' in results else None
+
+    if verbose:
+        print(f"Found {len(documents)} relevant documents")
+
+    # Build context string
+    context_parts = []
+    references = []
+
+    for i, doc in enumerate(documents):
+        # Add to context
+        context_parts.append(f"Source {i+1}: {doc}")
+
+        # Build reference data
+        ref_data = {
+            "id": i + 1,
+            "content": doc,
+            "relevance_score": None
+        }
+
+        # Add metadata if available
+        if metadatas and i < len(metadatas) and metadatas[i]:
+            metadata = metadatas[i]
+            ref_data.update({
+                "source": metadata.get("source", "Unknown"),
+                "chunk_id": metadata.get("chunk_id"),
+                "keywords": metadata.get("keywords", "").split(", ") if metadata.get("keywords") else [],
+                "entities": metadata.get("entities", "").split(", ") if metadata.get("entities") else [],
+                "type": metadata.get("type", "text")
+            })
+
+        # Add similarity score if available
+        if distances and i < len(distances) and distances[i] is not None:
+            # Convert distance to similarity percentage (lower distance = higher similarity)
+            similarity = max(0, min(100, (1 - distances[i]) * 100))
+            ref_data["relevance_score"] = round(similarity, 1)
+
+        references.append(ref_data)
+
+    return {
+        "context": "\n\n".join(context_parts),
+        "references": references,
+        "total_sources": len(references)
+    }
 
 
 def list_collections() -> List[str]:
