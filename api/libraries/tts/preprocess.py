@@ -567,16 +567,21 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
                             print(
                                 f"Warning: Mixed precision failed for DeepFilterNet: {e}")
 
-                    # Apply torch.compile for high-end GPUs
+                    # Apply torch.compile for high-end GPUs (but be cautious with mixed precision)
                     if device_info.get('is_high_end', False) and hasattr(torch, 'compile'):
-                        try:
-                            model = torch.compile(
-                                model, mode="reduce-overhead")
+                        # torch.compile can be problematic with DeepFilterNet + mixed precision
+                        if device_info.get('mixed_precision', True):
                             print(
-                                "✓ Applied torch.compile optimization to DeepFilterNet")
-                        except Exception as e:
-                            print(
-                                f"Warning: torch.compile failed for DeepFilterNet: {e}")
+                                "⚠️  Skipping torch.compile for DeepFilterNet with mixed precision (known compatibility issues)")
+                        else:
+                            try:
+                                model = torch.compile(
+                                    model, mode="reduce-overhead")
+                                print(
+                                    "✓ Applied torch.compile optimization to DeepFilterNet")
+                            except Exception as e:
+                                print(
+                                    f"Warning: torch.compile failed for DeepFilterNet: {e}")
 
                     # Set CUDA optimizations
                     torch.backends.cudnn.benchmark = True
@@ -630,36 +635,84 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
         # Read and process audio
         audio_data, sample_rate = sf.read(input_file, always_2d=True)
 
+        # Determine target precision early
+        target_dtype = torch.float32
+        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+            mixed_precision_enabled = device_info.get('mixed_precision', True)
+            if mixed_precision_enabled and hasattr(model, 'dtype') and model.dtype == torch.float16:
+                target_dtype = torch.float16
+                print("✓ Target precision: FP16 to match DeepFilterNet model")
+
         # Resample if necessary
         if sample_rate != state.sr():
             print(f"Resampling audio from {sample_rate}Hz to {state.sr()}Hz")
             audio_data = resampy.resample(audio_data, sample_rate, state.sr())
             sample_rate = state.sr()
 
-        # Convert to float32 and create tensor
-        audio_data = audio_data.astype(np.float32).T
-        audio_tensor = torch.from_numpy(audio_data)
+        # Convert to target precision and create tensor
+        if target_dtype == torch.float16:
+            audio_data = audio_data.astype(
+                np.float32).T  # Create as float32 first
+            audio_tensor = torch.from_numpy(audio_data)
+        else:
+            audio_data = audio_data.astype(np.float32).T
+            audio_tensor = torch.from_numpy(audio_data)
 
-        # Move tensor to same device as model
+        # Move tensor to same device as model and convert to target precision
         if hasattr(model, 'device'):
             audio_tensor = audio_tensor.to(model.device)
+
+            # Convert to target precision after moving to device
+            if target_dtype == torch.float16:
+                audio_tensor = audio_tensor.to(dtype=target_dtype)
+                print("✓ Audio tensor converted to FP16 after device placement")
 
         # Enhance audio with device-specific optimization
         # Note: DeepFilterNet can be sensitive to mixed precision with complex numbers
         start_time = time.perf_counter()
 
         with torch.no_grad():  # Use no_grad for inference to save memory
-            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
-                # Use mixed precision carefully with DeepFilterNet
-                mixed_precision_enabled = device_info.get(
-                    'mixed_precision', True)
-                if mixed_precision_enabled and hasattr(model, 'dtype') and model.dtype == torch.float16:
-                    # Convert to half precision for inference
-                    audio_tensor = audio_tensor.half()
+            try:
+                enhanced_audio = enhance(model, state, audio_tensor)
+            except RuntimeError as e:
+                error_msg = str(e)
+                if ("type torch.float16" in error_msg and "torch.float32" in error_msg) or \
+                   ("backend='inductor'" in error_msg and ("Half" in error_msg or "Float" in error_msg)):
+                    print(
+                        f"⚠️  Precision/compilation mismatch detected: {error_msg}")
+                    print(
+                        "🔄 Attempting to fix by ensuring tensor precision consistency...")
 
-                enhanced_audio = enhance(model, state, audio_tensor)
-            else:
-                enhanced_audio = enhance(model, state, audio_tensor)
+                    # Try to fix precision mismatch
+                    if hasattr(model, 'dtype'):
+                        audio_tensor = audio_tensor.to(dtype=model.dtype)
+                        print(f"✓ Converted audio tensor to {model.dtype}")
+
+                        try:
+                            enhanced_audio = enhance(
+                                model, state, audio_tensor)
+                            print(
+                                "✓ Audio enhancement successful after precision fix")
+                        except RuntimeError as retry_error:
+                            print(
+                                f"⚠️  Still failing after precision fix: {retry_error}")
+                            print("🔄 Falling back to FP32 processing...")
+                            # Fall back to FP32 processing
+                            audio_tensor = audio_tensor.to(dtype=torch.float32)
+                            # If model was compiled with mixed precision, try to reset it
+                            if hasattr(model, 'dtype') and model.dtype == torch.float16:
+                                # Convert model back to FP32 for this operation
+                                model = model.float()
+                                print(
+                                    "✓ Converted model to FP32 for fallback processing")
+                            enhanced_audio = enhance(
+                                model, state, audio_tensor)
+                            print(
+                                "✓ Audio enhancement successful with FP32 fallback")
+                    else:
+                        raise e
+                else:
+                    raise e
 
         processing_time = time.perf_counter() - start_time
         print(f"✓ Audio cleaning completed in {processing_time:.3f}s")

@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
-import { X } from 'lucide-react';
+import { X, GripVertical } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
 
 // Global file storage for the character creation flow
@@ -39,9 +39,18 @@ const VoiceCloningUpload = () => {
     compression: true
   });
 
+  // Drag and drop state for reordering
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS', description: 'High quality, fast inference' },
     { id: 'xtts', name: 'XTTS-v2', description: 'Multilingual support' },
+  ];
+
+  const processingSteps = [
+    { id: 'clean', name: 'Clean Audio', description: 'Noise reduction' },
+    { id: 'remove_silence', name: 'Remove Silence', description: 'Remove quiet segments' },
+    { id: 'enhance', name: 'Enhance Audio', description: 'Quality enhancement' },
   ];
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
@@ -64,6 +73,50 @@ const VoiceCloningUpload = () => {
       ...prev,
       [key]: value
     }));
+  };
+
+  // Drag and drop handlers for reordering
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDragDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    
+    if (draggedIndex === null || draggedIndex === dropIndex) {
+      setDraggedIndex(null);
+      return;
+    }
+
+    const newOrder = [...preprocessingConfig.preprocessing_order];
+    const draggedItem = newOrder[draggedIndex];
+    
+    // Remove dragged item
+    newOrder.splice(draggedIndex, 1);
+    
+    // Insert at new position
+    newOrder.splice(dropIndex, 0, draggedItem);
+    
+    setPreprocessingConfig(prev => ({
+      ...prev,
+      preprocessing_order: newOrder
+    }));
+    
+    setDraggedIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
+  };
+
+  const getStepInfo = (stepId: string) => {
+    return processingSteps.find(step => step.id === stepId);
   };
 
   const createCharacter = async () => {
@@ -191,8 +244,6 @@ const VoiceCloningUpload = () => {
     // Navigate to style tuning (skip TTS config since it's now integrated)
     navigate('/style-tuning');
   };
-
-
 
   const handleCreateCharacter = () => {
     createCharacter();
@@ -347,6 +398,53 @@ const VoiceCloningUpload = () => {
 
               {!preprocessingConfig.skip_all_processing && (
                 <>
+                  {/* Processing Order */}
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <h4 className="text-sm font-medium text-gray-700 mb-3">Processing Order</h4>
+                    <p className="text-xs text-gray-500 mb-3">Drag and drop to reorder the processing steps</p>
+                    <div className="space-y-2">
+                      {preprocessingConfig.preprocessing_order.map((stepId, index) => {
+                        const stepInfo = getStepInfo(stepId);
+                        const isEnabled = preprocessingConfig[stepId === 'clean' ? 'clean_audio' : stepId === 'remove_silence' ? 'remove_silence' : 'enhance_audio'];
+                        
+                        return (
+                          <div
+                            key={stepId}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, index)}
+                            onDragOver={handleDragOver}
+                            onDrop={(e) => handleDragDrop(e, index)}
+                            onDragEnd={handleDragEnd}
+                            className={`flex items-center p-3 border rounded-md cursor-move transition-all ${
+                              draggedIndex === index 
+                                ? 'opacity-50 transform scale-95' 
+                                : 'hover:bg-gray-50'
+                            } ${
+                              isEnabled 
+                                ? 'border-gray-300 bg-white' 
+                                : 'border-gray-200 bg-gray-100 opacity-60'
+                            }`}
+                          >
+                            <GripVertical className="w-4 h-4 text-gray-400 mr-3" />
+                            <div className="flex-1">
+                              <div className="flex items-center">
+                                <span className="text-sm font-medium text-gray-900 mr-2">
+                                  {index + 1}. {stepInfo?.name}
+                                </span>
+                                {!isEnabled && (
+                                  <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">
+                                    Disabled
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-gray-500 mt-1">{stepInfo?.description}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   {/* Individual processing options */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <label className="flex items-center">
@@ -466,25 +564,7 @@ const VoiceCloningUpload = () => {
         >
           Back
         </button>
-                <div className="space-x-2">
-          {/* <button
-            onClick={handleCreateCharacter}
-            disabled={isCreating || files.length === 0 || !referenceText.trim()}
-            className={`px-4 py-2 rounded-md ${
-              !isCreating && files.length > 0 && referenceText.trim()
-                ? 'bg-green-600 text-white hover:bg-green-700'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-            }`}
-          >
-            {isCreating ? (
-              <div className="flex items-center">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                Creating...
-              </div>
-            ) : (
-              'Create Character Now'
-            )}
-          </button> */}
+        <div className="space-x-2">
           <button
             onClick={handleSubmit}
             disabled={isCreating || files.length === 0 || !referenceText.trim()}

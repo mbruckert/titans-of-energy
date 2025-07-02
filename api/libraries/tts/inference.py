@@ -40,11 +40,14 @@ _apple_neural_engine_available = False
 _cuda_memory_fraction = 0.8
 _mixed_precision_enabled = False
 
+# Model-specific optimization flags
+_xtts_mixed_precision_enabled = False  # XTTS has numerical issues with FP16
+
 
 def _get_device_optimization():
     """Get cached device optimization info."""
     global _device_type, _device_info, _mps_available, _apple_neural_engine_available
-    global _mixed_precision_enabled
+    global _mixed_precision_enabled, _xtts_mixed_precision_enabled
 
     if DEVICE_OPTIMIZATION_AVAILABLE and (_device_type is None or _device_info is None):
         _device_type, _device_info = get_device_info()
@@ -63,12 +66,16 @@ def _get_device_optimization():
         elif _device_type == DeviceType.NVIDIA_GPU:
             _mixed_precision_enabled = _device_info.get(
                 'mixed_precision', True)
+            # XTTS has numerical stability issues with FP16, so disable mixed precision for it
+            _xtts_mixed_precision_enabled = False
             # Set CUDA memory fraction based on GPU memory
             gpu_memory = _device_info.get('memory_gb', 8)
             _cuda_memory_fraction = min(
                 0.9, max(0.7, (gpu_memory - 2) / gpu_memory))
             print(
                 f"🎯 NVIDIA GPU Features: Mixed Precision={_mixed_precision_enabled}, Memory Fraction={_cuda_memory_fraction:.2f}")
+            print(
+                f"🎯 XTTS Mixed Precision: {_xtts_mixed_precision_enabled} (disabled for numerical stability)")
 
     return _device_type, _device_info
 
@@ -100,29 +107,40 @@ def _optimize_for_apple_silicon(model, device_info: Dict[str, Any]):
         return model
 
 
-def _optimize_for_nvidia_gpu(model, device_info: Dict[str, Any]):
-    """Apply NVIDIA GPU specific optimizations."""
+def _optimize_for_nvidia_gpu(model, device_info: Dict[str, Any], model_name: str = ""):
+    """Apply NVIDIA GPU specific optimizations with model-specific handling."""
     try:
         # Move model to GPU
         if hasattr(model, 'to'):
             model = model.to('cuda')
             print("✓ Moved model to CUDA")
 
-        # Enable mixed precision if supported
-        if _mixed_precision_enabled and hasattr(model, 'half'):
+        # Enable mixed precision if supported and appropriate for the model
+        should_use_mixed_precision = _mixed_precision_enabled
+        if model_name.lower() == "xtts":
+            should_use_mixed_precision = _xtts_mixed_precision_enabled
+            if not should_use_mixed_precision:
+                print(
+                    "✓ Using FP32 for XTTS (mixed precision disabled for numerical stability)")
+
+        if should_use_mixed_precision and hasattr(model, 'half'):
             try:
                 model = model.half()
                 print("✓ Enabled mixed precision (FP16)")
             except Exception as e:
                 print(f"Warning: Mixed precision failed, using FP32: {e}")
 
-        # Apply torch.compile for high-end GPUs
+        # Apply torch.compile for high-end GPUs (but be careful with XTTS)
         if device_info.get('is_high_end', False) and hasattr(torch, 'compile'):
-            try:
-                model = torch.compile(model, mode="reduce-overhead")
-                print("✓ Applied torch.compile optimization")
-            except Exception as e:
-                print(f"Warning: torch.compile failed: {e}")
+            # XTTS has known issues with torch.compile, so be more cautious
+            if model_name.lower() == "xtts":
+                print("⚠️  Skipping torch.compile for XTTS (known compatibility issues)")
+            else:
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                    print("✓ Applied torch.compile optimization")
+                except Exception as e:
+                    print(f"Warning: torch.compile failed: {e}")
 
         # Set CUDA memory management
         if torch.cuda.is_available():
@@ -144,6 +162,11 @@ def _optimize_for_nvidia_gpu(model, device_info: Dict[str, Any]):
 def _get_f5tts_model(force_init: bool = False):
     """Get or initialize F5TTS model with comprehensive device optimization."""
     global _f5tts_model, _model_load_times, _model_memory_usage
+
+    # Check if model is already loaded and return it without re-initialization
+    if _f5tts_model is not None and not force_init:
+        print("✓ F5TTS model already loaded in memory, reusing...")
+        return _f5tts_model
 
     if _f5tts_model is None or force_init:
         try:
@@ -168,21 +191,8 @@ def _get_f5tts_model(force_init: bool = False):
                 device_str = "cuda" if torch.cuda.is_available() else "cpu"
 
             # Initialize F5TTS with device-specific settings
+            # Note: F5TTS API only accepts device parameter in constructor
             model_kwargs = {"device": device_str}
-
-            # Add device-specific model parameters
-            if device_type == DeviceType.APPLE_SILICON:
-                # Conservative settings for Apple Silicon
-                model_kwargs.update({
-                    "low_memory": not device_info.get('is_high_end', False),
-                    "precision": "float32",  # Apple Silicon works better with FP32
-                })
-            elif device_type == DeviceType.NVIDIA_GPU:
-                # Aggressive settings for NVIDIA GPUs
-                model_kwargs.update({
-                    "low_memory": device_info.get('memory_gb', 8) < 12,
-                    "precision": "float16" if _mixed_precision_enabled else "float32",
-                })
 
             _f5tts_model = F5TTS(**model_kwargs)
 
@@ -192,7 +202,7 @@ def _get_f5tts_model(force_init: bool = False):
                     _f5tts_model, device_info)
             elif device_type == DeviceType.NVIDIA_GPU:
                 _f5tts_model = _optimize_for_nvidia_gpu(
-                    _f5tts_model, device_info)
+                    _f5tts_model, device_info, "f5tts")
 
             # Record performance metrics
             load_time = time.perf_counter() - start_time
@@ -223,6 +233,11 @@ def _get_f5tts_model(force_init: bool = False):
 def _get_xtts_model(force_init: bool = False):
     """Get or initialize XTTS model with comprehensive device optimization."""
     global _xtts_model, _model_load_times, _model_memory_usage
+
+    # Check if model is already loaded and return it without re-initialization
+    if _xtts_model is not None and not force_init:
+        print("✓ XTTS model already loaded in memory, reusing...")
+        return _xtts_model
 
     if _xtts_model is None or force_init:
         try:
@@ -266,7 +281,7 @@ def _get_xtts_model(force_init: bool = False):
                         _xtts_model, device_info)
                 elif device_type == DeviceType.NVIDIA_GPU:
                     _xtts_model = _optimize_for_nvidia_gpu(
-                        _xtts_model, device_info)
+                        _xtts_model, device_info, "xtts")
 
                 # Record performance metrics
                 load_time = time.perf_counter() - start_time
@@ -365,8 +380,20 @@ def generate_audio(
         default_config.update(config)
     config = default_config
 
-    # Auto-download model if requested
-    if auto_download:
+    # Check if model is already loaded, otherwise ensure it's available
+    model_lower = model.lower()
+    model_already_loaded = False
+
+    if model_lower == "f5tts":
+        model_already_loaded = is_model_loaded("f5tts")
+    elif model_lower == "xtts":
+        model_already_loaded = is_model_loaded("xtts")
+
+    if model_already_loaded:
+        print(
+            f"✓ Model {model} already loaded in memory, skipping availability check...")
+    elif auto_download:
+        print(f"📥 Checking availability for model: {model}")
         success = ensure_model_available(model, config.get('cache_dir'))
         if not success:
             print(
@@ -381,7 +408,6 @@ def generate_audio(
     output_file = output_dir / f"generated_audio_{timestamp}.wav"
 
     # Route to appropriate model implementation
-    model_lower = model.lower()
     if model_lower == "f5tts":
         return _generate_f5tts(ref_audio, ref_text, gen_text, str(output_file), config)
     elif model_lower == "xtts":
@@ -395,15 +421,15 @@ def generate_audio(
 
 def ensure_model_available(model: str, cache_dir: Optional[str] = None) -> bool:
     """
-    Ensure that the specified model is available for inference.
-    Downloads it if necessary.
+    Ensure that the specified model is available on disk (downloads/installs if necessary).
+    This does NOT load the model into memory - use preload_models_smart() for that.
 
     Args:
         model: Model name to check/download
         cache_dir: Directory to cache models
 
     Returns:
-        True if model is available, False otherwise
+        True if model is available on disk, False otherwise
     """
     # Import here to avoid circular imports
     try:
@@ -453,7 +479,7 @@ def _generate_f5tts(
         print(f"Using reference: {ref_audio}")
         print(f"Reference text: {ref_text[:100]}...")
 
-        # Get the F5TTS model
+        # Get the F5TTS model (should be cached in memory)
         f5tts_model = _get_f5tts_model()
         device_type, device_info = _get_device_optimization()
 
@@ -485,7 +511,7 @@ def _generate_f5tts(
         except Exception as e:
             print(f"Warning: Could not validate audio/text lengths: {e}")
 
-        # Prepare generation parameters with device optimization
+        # Prepare generation parameters - use only basic F5TTS API parameters
         generation_params = {
             'ref_file': ref_audio,
             'ref_text': ref_text,
@@ -494,20 +520,6 @@ def _generate_f5tts(
             'seed': config.get('seed', None),
             'remove_silence': config.get('remove_silence', True),
         }
-
-        # Add device-specific parameters
-        if device_type == DeviceType.APPLE_SILICON:
-            # Apple Silicon optimizations
-            generation_params.update({
-                'batch_size': min(config.get('batch_size', 2), 2),
-                'use_mps': config.get('use_mps', _mps_available),
-            })
-        elif device_type == DeviceType.NVIDIA_GPU:
-            # NVIDIA GPU optimizations
-            generation_params.update({
-                'batch_size': config.get('batch_size', 4),
-                'use_mixed_precision': config.get('use_mixed_precision', _mixed_precision_enabled),
-            })
 
         # Use autocast for mixed precision on NVIDIA GPUs with retry logic for tensor mismatches
         max_retries = 2
@@ -567,7 +579,7 @@ def _generate_xtts(
         print(f"Generating XTTS audio for text: {gen_text[:100]}...")
         print(f"Using reference: {ref_audio}")
 
-        # Get the XTTS model
+        # Get the XTTS model (should be cached in memory)
         xtts_model = _get_xtts_model()
         device_type, device_info = _get_device_optimization()
 
@@ -581,12 +593,37 @@ def _generate_xtts(
             'file_path': output_file
         }
 
-        # Use autocast for mixed precision on NVIDIA GPUs
-        if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+        # Use autocast for mixed precision on NVIDIA GPUs (but not for XTTS due to numerical instability)
+        try:
+            if device_type == DeviceType.NVIDIA_GPU and _xtts_mixed_precision_enabled:
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    xtts_model.tts_to_file(**generation_params)
+            else:
+                # Use FP32 for XTTS to avoid numerical instability issues
                 xtts_model.tts_to_file(**generation_params)
-        else:
-            xtts_model.tts_to_file(**generation_params)
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "device-side assert triggered" in error_msg or "probability tensor" in error_msg:
+                print(f"⚠️  XTTS numerical instability detected: {error_msg}")
+                print("🔄 Attempting recovery by clearing CUDA cache and retrying...")
+
+                # Clear CUDA cache and try again
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                # Retry with explicit FP32 (no autocast)
+                try:
+                    print("🔄 Retrying XTTS generation with FP32 precision...")
+                    xtts_model.tts_to_file(**generation_params)
+                    print("✓ XTTS recovery successful with FP32")
+                except Exception as retry_error:
+                    print(f"✗ XTTS recovery failed: {retry_error}")
+                    raise RuntimeError(
+                        f"XTTS generation failed even after recovery attempt: {retry_error}")
+            else:
+                # Re-raise if it's a different type of error
+                raise e
 
         runtime = time.perf_counter() - start_time
         print(f"✓ XTTS-v2 generation completed in {runtime:.3f}s")
@@ -965,17 +1002,18 @@ def preload_models_smart(models: List[str] = None, force_reload: bool = False):
         try:
             # Check if model is already loaded
             if not force_reload and is_model_loaded(model_lower):
-                print(f"✓ TTS model {model_lower} already loaded, skipping...")
+                print(
+                    f"✓ TTS model {model_lower.upper()} already loaded in memory, skipping preload...")
                 continue
 
             if model_lower == "f5tts":
-                print("🔄 Preloading F5TTS model...")
+                print("🔄 Preloading F5TTS model into memory...")
                 _get_f5tts_model(force_init=force_reload)
-                print("✓ F5TTS model preloaded successfully!")
+                print("✓ F5TTS model preloaded and cached in memory!")
             elif model_lower == "xtts":
-                print("🔄 Preloading XTTS model...")
+                print("🔄 Preloading XTTS model into memory...")
                 _get_xtts_model(force_init=force_reload)
-                print("✓ XTTS model preloaded successfully!")
+                print("✓ XTTS model preloaded and cached in memory!")
         except Exception as e:
             print(f"✗ Failed to preload {model}: {e}")
 

@@ -1,4 +1,4 @@
-export const API_BASE_URL = 'http://localhost:5000';
+export const API_BASE_URL = 'https://21yutww8lv65lc-5000.proxy.runpod.net';
 
 export const API_ENDPOINTS = {
   // Character endpoints
@@ -21,6 +21,7 @@ export const API_ENDPOINTS = {
   // Model endpoints
   DOWNLOAD_MODEL: '/download-model',
   GET_TTS_MODELS: '/get-tts-models',
+  GET_LLM_MODELS: '/get-llm-models',
   GET_LOADED_MODELS: '/get-loaded-models',
   UNLOAD_MODELS: '/unload-models',
   GET_LOADED_LLM_MODELS: '/get-loaded-llm-models',

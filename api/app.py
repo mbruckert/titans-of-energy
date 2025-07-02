@@ -121,6 +121,51 @@ def get_db_connection():
 # Global model cache
 model_cache = {}
 
+
+def resolve_model_path(model_id: str) -> tuple[str, str]:
+    """
+    Resolve model ID to actual model path and type.
+
+    Args:
+        model_id: Model identifier (e.g., "google-gemma-3-4b-it-qat-q4_0-gguf")
+
+    Returns:
+        Tuple of (model_path, model_type)
+    """
+    # Define supported models with their paths
+    model_configs = {
+        "google-gemma-3-4b-it-qat-q4_0-gguf": {
+            "path": "./models/google_gemma-3-4b-it-qat-q4_0-gguf/gemma-3-4b-it-q4_0.gguf",
+            "type": "gguf"
+        },
+        "llama-3.2-3b": {
+            "path": "meta-llama/Llama-3.2-3B",
+            "type": "huggingface"
+        },
+        "gpt-4o": {
+            "path": "gpt-4o",
+            "type": "openai_api"
+        },
+        "gpt-4o-mini": {
+            "path": "gpt-4o-mini",
+            "type": "openai_api"
+        }
+    }
+
+    # Check if model_id is in our supported models
+    if model_id in model_configs:
+        config = model_configs[model_id]
+        return config["path"], config["type"]
+
+    # Fallback: try to determine type based on the model_id
+    if model_id.endswith('.gguf'):
+        return model_id, "gguf"
+    elif any(api_model in model_id.lower() for api_model in ['gpt-', 'claude-', 'openai']):
+        return model_id, "openai_api"
+    else:
+        return model_id, "huggingface"
+
+
 # STT (Speech-to-Text) optimizations - Global Whisper model cache
 _whisper_model = None
 _whisper_model_size = None
@@ -137,7 +182,7 @@ def _get_optimal_whisper_model_size(device_type, device_info):
     if device_type == DeviceType.NVIDIA_GPU:
         gpu_memory = device_info.get('memory_gb', 8)
         if gpu_memory >= 16 and device_info.get('is_high_end', False):
-            return "large-v3"  # Best quality for high-end GPUs
+            return "small"  # Best quality for high-end GPUs
         elif gpu_memory >= 12:
             return "medium"  # Good balance
         elif gpu_memory >= 8:
@@ -869,22 +914,28 @@ def load_character():
             try:
                 llm_config = character['llm_config']
 
+                # Resolve model path and type
+                model_path, model_type_str = resolve_model_path(
+                    character['llm_model'])
+
                 # Determine model type
                 if 'api_key' in llm_config:
                     model_type = ModelType.OPENAI_API
-                elif character['llm_model'].endswith('.gguf'):
+                elif model_type_str == "gguf":
                     model_type = ModelType.GGUF
+                elif model_type_str == "openai_api":
+                    model_type = ModelType.OPENAI_API
                 else:
                     model_type = ModelType.HUGGINGFACE
 
                 print(
-                    f"Preloading LLM model '{character['llm_model']}' for {character_name}...")
+                    f"Preloading LLM model '{character['llm_model']}' (resolved to: {model_path}) for {character_name}...")
 
                 # Preload the model into cache
                 model = preload_llm_model(
                     model_type=model_type,
                     model_config={
-                        'model_path': character['llm_model'],
+                        'model_path': model_path,
                         **llm_config
                     },
                     cache_key=needed_llm_cache_key
@@ -1030,11 +1081,13 @@ def ask_question_text():
         styled_response = ""
         if character['llm_model'] and character['llm_config']:
             try:
+                # Resolve model path for text generation
+                model_path, _ = resolve_model_path(character['llm_model'])
                 styled_response = generate_styled_text(
                     question,
                     style_examples,
                     knowledge_context,
-                    character['llm_model'],
+                    model_path,
                     character['llm_config'],
                     character_name=character_name
                 )
@@ -1236,11 +1289,13 @@ def ask_question_audio():
         styled_response = ""
         if character['llm_model'] and character['llm_config']:
             try:
+                # Resolve model path for text generation
+                model_path, _ = resolve_model_path(character['llm_model'])
                 styled_response = generate_styled_text(
                     question,
                     style_examples,
                     knowledge_context,
-                    character['llm_model'],
+                    model_path,
                     character['llm_config'],
                     character_name=character_name
                 )
@@ -1332,6 +1387,83 @@ def download_model_endpoint():
             return jsonify({"model_path": model_path, "status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-llm-models', methods=['GET'])
+def get_llm_models():
+    """
+    Get list of available LLM models with their availability status.
+    """
+    try:
+        from libraries.llm.inference import list_available_models
+        import os
+
+        # Get list of available models
+        available_models = list_available_models()
+
+        # Define the models we support in the frontend
+        supported_models = [
+            {"id": "google-gemma-3-4b-it-qat-q4_0-gguf", "name": "Gemma3 4B", "type": "gguf",
+                "path": "./models/google_gemma-3-4b-it-qat-q4_0-gguf/gemma-3-4b-it-q4_0.gguf"},
+            {"id": "llama-3.2-3b", "name": "Llama 3.2 3B",
+                "type": "huggingface", "repo": "meta-llama/Llama-3.2-3B"},
+            {"id": "gpt-4o", "name": "GPT-4o",
+                "type": "openai_api", "repo": "gpt-4o"},
+            {"id": "gpt-4o-mini", "name": "GPT-4o-mini",
+                "type": "openai_api", "repo": "gpt-4o-mini"},
+        ]
+
+        # Check availability for each model
+        model_info = []
+        for model in supported_models:
+            model_data = {
+                "id": model["id"],
+                "name": model["name"],
+                "type": model["type"],
+                "repo": model.get("repo", ""),
+                "path": model.get("path", ""),
+                "requiresKey": model["type"] == "openai_api",
+                "available": False,
+                "downloaded": False
+            }
+
+            if model["type"] == "openai_api":
+                # API models are always "available" but need keys
+                model_data["available"] = True
+                model_data["downloaded"] = True
+            elif model["type"] == "gguf":
+                # Check if GGUF file exists locally
+                gguf_path = model.get("path", "")
+                if gguf_path and os.path.exists(gguf_path):
+                    model_data["available"] = True
+                    model_data["downloaded"] = True
+            elif model["type"] == "huggingface":
+                # Check if model is downloaded locally
+                models_dir = "./models"  # Adjust path as needed
+                if os.path.exists(models_dir):
+                    # Check for GGUF file
+                    model_filename = f"{model['repo'].replace('/', '_')}.gguf"
+                    model_path = os.path.join(models_dir, model_filename)
+                    if os.path.exists(model_path):
+                        model_data["available"] = True
+                        model_data["downloaded"] = True
+                    else:
+                        # Check for directory with model files
+                        model_dir = os.path.join(
+                            models_dir, model['repo'].replace('/', '_'))
+                        if os.path.exists(model_dir) and os.listdir(model_dir):
+                            model_data["available"] = True
+                            model_data["downloaded"] = True
+
+            model_info.append(model_data)
+
+        return jsonify({
+            "models": model_info,
+            "status": "success"
+        }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

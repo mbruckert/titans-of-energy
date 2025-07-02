@@ -6,4 +6,4 @@ openai-whisper>=20230314
 pygame>=2.5.0
 scipy>=1.10.0
 numpy>=1.24.0
-requests>=2.31.0 
+requests>=2.31.0

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, ChangeEvent } from 'react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+import { GripVertical } from 'lucide-react';
 
 interface Character {
   id: number;
@@ -61,12 +62,16 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     remove_silence: true,
     enhance_audio: true,
     skip_all_processing: false,
+    preprocessing_order: ['clean', 'remove_silence', 'enhance'],
     top_db: 40.0,
     fade_length_ms: 50,
     bass_boost: true,
     treble_boost: true,
     compression: true
   });
+
+  // Drag and drop state for reordering
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
   const models = [
     { id: 'gemma-3-4b', name: 'Gemma3 4B', requiresKey: false },
@@ -78,6 +83,12 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS' },
     { id: 'xtts', name: 'XTTS-v2' },
+  ];
+
+  const processingSteps = [
+    { id: 'clean', name: 'Clean Audio', description: 'Noise reduction' },
+    { id: 'remove_silence', name: 'Remove Silence', description: 'Remove quiet segments' },
+    { id: 'enhance', name: 'Enhance Audio', description: 'Quality enhancement' },
   ];
 
   useEffect(() => {
@@ -119,6 +130,7 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                 remove_silence: fullCharacter.voice_cloning_settings.remove_silence ?? true,
                 enhance_audio: fullCharacter.voice_cloning_settings.enhance_audio ?? true,
                 skip_all_processing: fullCharacter.voice_cloning_settings.skip_all_processing ?? false,
+                preprocessing_order: fullCharacter.voice_cloning_settings.preprocessing_order ?? ['clean', 'remove_silence', 'enhance'],
                 top_db: fullCharacter.voice_cloning_settings.top_db ?? 40.0,
                 fade_length_ms: fullCharacter.voice_cloning_settings.fade_length_ms ?? 50,
                 bass_boost: fullCharacter.voice_cloning_settings.bass_boost ?? true,
@@ -183,6 +195,50 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
       ...prev,
       [key]: value
     }));
+  };
+
+  // Drag and drop handlers for reordering
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDragDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    
+    if (draggedIndex === null || draggedIndex === dropIndex) {
+      setDraggedIndex(null);
+      return;
+    }
+
+    const newOrder = [...preprocessingConfig.preprocessing_order];
+    const draggedItem = newOrder[draggedIndex];
+    
+    // Remove dragged item
+    newOrder.splice(draggedIndex, 1);
+    
+    // Insert at new position
+    newOrder.splice(dropIndex, 0, draggedItem);
+    
+    setPreprocessingConfig(prev => ({
+      ...prev,
+      preprocessing_order: newOrder
+    }));
+    
+    setDraggedIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
+  };
+
+  const getStepInfo = (stepId: string) => {
+    return processingSteps.find(step => step.id === stepId);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -465,6 +521,53 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
 
                   {!preprocessingConfig.skip_all_processing && (
                     <>
+                      {/* Processing Order */}
+                      <div className="bg-white p-3 rounded border">
+                        <h5 className="text-sm font-medium text-gray-700 mb-2">Processing Order</h5>
+                        <p className="text-xs text-gray-500 mb-3">Drag and drop to reorder the processing steps</p>
+                        <div className="space-y-2">
+                          {preprocessingConfig.preprocessing_order.map((stepId, index) => {
+                            const stepInfo = getStepInfo(stepId);
+                            const isEnabled = preprocessingConfig[stepId === 'clean' ? 'clean_audio' : stepId === 'remove_silence' ? 'remove_silence' : 'enhance_audio'];
+                            
+                            return (
+                              <div
+                                key={stepId}
+                                draggable
+                                onDragStart={(e) => handleDragStart(e, index)}
+                                onDragOver={handleDragOver}
+                                onDrop={(e) => handleDragDrop(e, index)}
+                                onDragEnd={handleDragEnd}
+                                className={`flex items-center p-2 border rounded cursor-move transition-all ${
+                                  draggedIndex === index 
+                                    ? 'opacity-50 transform scale-95' 
+                                    : 'hover:bg-gray-50'
+                                } ${
+                                  isEnabled 
+                                    ? 'border-gray-300 bg-white' 
+                                    : 'border-gray-200 bg-gray-100 opacity-60'
+                                }`}
+                              >
+                                <GripVertical className="w-3 h-3 text-gray-400 mr-2" />
+                                <div className="flex-1">
+                                  <div className="flex items-center">
+                                    <span className="text-xs font-medium text-gray-900 mr-2">
+                                      {index + 1}. {stepInfo?.name}
+                                    </span>
+                                    {!isEnabled && (
+                                      <span className="text-xs text-gray-500 bg-gray-200 px-1 py-0.5 rounded">
+                                        Disabled
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-gray-500">{stepInfo?.description}</p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
                       {/* Individual processing options */}
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <label className="flex items-center">

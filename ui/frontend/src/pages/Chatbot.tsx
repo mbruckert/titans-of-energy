@@ -20,6 +20,8 @@ const Chatbot = () => {
     const [isListening, setIsListening] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+    const [isLoadingCharacter, setIsLoadingCharacter] = useState(true);
+    const [characterLoadingStatus, setCharacterLoadingStatus] = useState("Preparing character...");
     const [error, setError] = useState<string | null>(null);
     const [currentAudio, setCurrentAudio] = useState<HTMLAudioElement | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -49,6 +51,9 @@ const Chatbot = () => {
 
     const loadCharacterModels = async () => {
         try {
+            setIsLoadingCharacter(true);
+            setCharacterLoadingStatus("Loading character models...");
+            
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOAD_CHARACTER}`, {
                 method: 'POST',
                 headers: {
@@ -59,17 +64,33 @@ const Chatbot = () => {
 
             if (!response.ok) {
                 console.warn('Failed to preload character models');
+                setCharacterLoadingStatus("Models not preloaded - performance may be slower");
             } else {
-                console.log('Character models loaded successfully');
+                const data = await response.json();
+                console.log('Character models loaded successfully:', data);
+                setCharacterLoadingStatus("Character ready!");
             }
+            
+            // Give a moment to show the "ready" status
+            setTimeout(() => {
+                setIsLoadingCharacter(false);
+            }, 1000);
+            
         } catch (err) {
             console.warn('Error loading character models:', err);
+            setCharacterLoadingStatus("Models not preloaded - performance may be slower");
+            setTimeout(() => {
+                setIsLoadingCharacter(false);
+            }, 1500);
         }
     };
 
     const loadChatHistory = async () => {
         try {
             setIsLoadingHistory(true);
+            // Add a small delay to ensure character loading is visible
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHAT_HISTORY}/${characterId}?limit=20`);
             
             if (response.ok) {
@@ -345,6 +366,42 @@ const Chatbot = () => {
                         >
                             Select Character
                         </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // Show loading screen while character is being prepared
+    if (isLoadingCharacter) {
+        return (
+            <div className="flex flex-col h-screen bg-gray-50">
+                <div className="flex-1 flex items-center justify-center">
+                    <div className="text-center max-w-md">
+                        <div className="mb-6">
+                            <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-black mx-auto mb-4"></div>
+                            <h2 className="text-2xl font-semibold text-gray-800 mb-2">Loading {characterName}</h2>
+                            <p className="text-gray-600">{characterLoadingStatus}</p>
+                        </div>
+                        
+                        <div className="bg-white rounded-lg shadow-sm p-4 border border-gray-200">
+                            <div className="flex items-center gap-3 mb-3">
+                                <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+                                <span className="text-sm text-gray-600">Preparing AI models</span>
+                            </div>
+                            <div className="flex items-center gap-3 mb-3">
+                                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                                <span className="text-sm text-gray-600">Loading voice synthesis</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <div className="w-3 h-3 bg-purple-500 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+                                <span className="text-sm text-gray-600">Initializing chat history</span>
+                            </div>
+                        </div>
+                        
+                        <p className="text-xs text-gray-500 mt-4">
+                            This may take a moment for the first interaction...
+                        </p>
                     </div>
                 </div>
             </div>
