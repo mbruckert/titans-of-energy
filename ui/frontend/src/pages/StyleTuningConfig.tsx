@@ -193,6 +193,7 @@ const StyleTuningConfig = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your style configuration files or drag and drop</p>
+        <p className="text-sm text-gray-500 mb-4">Upload text files with example conversations or personality descriptions</p>
         <p className="text-xs text-gray-500 mb-4">Accepted formats: TXT, JSON, YAML, YML</p>
         <input
           type="file"
