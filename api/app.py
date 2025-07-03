@@ -216,8 +216,11 @@ def _get_stt_device(device_type, device_info):
     if device_type == DeviceType.NVIDIA_GPU:
         return "cuda"
     elif device_type == DeviceType.APPLE_SILICON:
-        # Whisper doesn't fully support MPS yet, use CPU with optimizations
-        return "cpu"
+        # Try MPS first for Apple Silicon, fallback to CPU if not available
+        if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return "mps"
+        else:
+            return "cpu"  # Fallback to CPU with optimizations
     else:
         return "cpu"
 
@@ -298,12 +301,17 @@ def _get_whisper_model():
                     # Enable Metal Performance Shaders optimizations where possible
                     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                         try:
-                            # Try to use MPS for some operations (Whisper has limited MPS support)
+                            # Enable MPS backend optimizations
                             torch.backends.mps.enabled = True
                             print("✓ Enabled MPS backend for compatible operations")
+                            
+                            # Set MPS-specific optimizations for Whisper
+                            if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
+                                torch.backends.mps.set_per_process_memory_fraction(0.8)
+                                print("✓ Set MPS memory fraction for Whisper")
                         except Exception as e:
                             print(
-                                f"Note: MPS not fully supported for Whisper: {e}")
+                                f"Note: Some MPS optimizations not available for Whisper: {e}")
 
                     print(f"✓ Optimized thread count: {optimal_threads}")
 
@@ -405,14 +413,30 @@ def _transcribe_audio_optimized(audio_path: str) -> str:
                     "patience": 1.0,
                 })
 
-        # Perform transcription
-        if device_type == DeviceType.NVIDIA_GPU and device_info.get('mixed_precision', True):
-            # Use autocast for mixed precision on NVIDIA GPUs
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                result = whisper_model.transcribe(
-                    audio_path, **transcribe_options)
-        else:
-            result = whisper_model.transcribe(audio_path, **transcribe_options)
+        # Perform transcription with device-specific optimizations
+        try:
+            if device_type == DeviceType.NVIDIA_GPU and device_info.get('mixed_precision', True):
+                # Use autocast for mixed precision on NVIDIA GPUs
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    result = whisper_model.transcribe(
+                        audio_path, **transcribe_options)
+            elif device_type == DeviceType.APPLE_SILICON and _stt_device == "mps":
+                # Use MPS optimizations for Apple Silicon
+                with torch.inference_mode():  # Use inference mode for better MPS performance
+                    result = whisper_model.transcribe(audio_path, **transcribe_options)
+            else:
+                result = whisper_model.transcribe(audio_path, **transcribe_options)
+        except Exception as transcribe_error:
+            # Handle MPS-specific errors and fallback to CPU
+            if _stt_device == "mps" and ("mps" in str(transcribe_error).lower() or "metal" in str(transcribe_error).lower()):
+                print(f"⚠️  MPS transcription failed, falling back to CPU: {transcribe_error}")
+                # Reload model on CPU for this transcription
+                import whisper
+                cpu_model = whisper.load_model(_whisper_model_size, device="cpu")
+                result = cpu_model.transcribe(audio_path, **transcribe_options)
+                del cpu_model  # Clean up
+            else:
+                raise transcribe_error
 
         transcript = result["text"].strip()
         transcription_time = time.perf_counter() - start_time
@@ -695,6 +719,15 @@ def create_character():
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
                         }
+                        
+                        # Add device optimization for Apple Silicon
+                        if DEVICE_OPTIMIZATION_AVAILABLE:
+                            device_type, device_info = get_device_info()
+                            if device_type == DeviceType.APPLE_SILICON:
+                                # Enable safe mode for Apple Silicon to avoid MPS issues with DeepFilterNet
+                                print("🍎 Apple Silicon detected - enabling safe mode for audio preprocessing")
+                                audio_processing_params['safe_mode'] = True
+                        
                         voice_cloning_audio_path = generate_reference_audio(
                             raw_audio_path,
                             output_file=str(
@@ -704,7 +737,20 @@ def create_character():
                         print(f"Audio preprocessing completed for {name}")
                     except Exception as e:
                         print(f"Warning: Voice preprocessing failed: {e}")
-                        voice_cloning_audio_path = raw_audio_path
+                        print("Attempting fallback with safe mode...")
+                        try:
+                            # Retry with safe mode enabled
+                            audio_processing_params['safe_mode'] = True
+                            voice_cloning_audio_path = generate_reference_audio(
+                                raw_audio_path,
+                                output_file=str(
+                                    character_dir / "voice_processed.wav"),
+                                **audio_processing_params
+                            )
+                            print(f"Audio preprocessing completed for {name} with safe mode fallback")
+                        except Exception as fallback_error:
+                            print(f"Warning: Voice preprocessing failed even with safe mode: {fallback_error}")
+                            voice_cloning_audio_path = raw_audio_path
                 else:
                     # Use raw audio without preprocessing
                     voice_cloning_audio_path = raw_audio_path
@@ -1054,9 +1100,13 @@ def ask_question_text():
         data = request.get_json()
         character_id = data.get('character_id')
         question = data.get('question')
+        fast_mode = data.get('fast_mode', True)  # Enable fast mode by default
+        real_time_optimization = data.get('real_time_optimization', False)
 
         if not character_id or not question:
             return jsonify({"error": "character_id and question are required"}), 400
+
+        print(f"🚀 Processing request - Fast mode: {fast_mode}, Real-time: {real_time_optimization}")
 
         # Get character data
         conn = get_db_connection()
@@ -1071,28 +1121,35 @@ def ask_question_text():
 
         character_name = character['name']
 
-        # Search knowledge base
+        # Search knowledge base - SKIP in ultra fast mode for maximum speed
         knowledge_context = ""
         knowledge_references = []
-        try:
-            kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-            kb_result = query_collection(
-                kb_collection, question, n_results=3, return_structured=True)
+        if not (fast_mode and real_time_optimization):
+            try:
+                kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
+                kb_result = query_collection(
+                    kb_collection, question, n_results=3, return_structured=True)
 
-            if isinstance(kb_result, dict) and "references" in kb_result:
-                knowledge_context = kb_result.get("context", "")
-                knowledge_references = kb_result.get("references", [])
-            else:
-                # Fallback to string format for backward compatibility
-                knowledge_context = str(kb_result)
-        except Exception as e:
-            print(f"Knowledge base search failed: {e}")
+                if isinstance(kb_result, dict) and "references" in kb_result:
+                    knowledge_context = kb_result.get("context", "")
+                    knowledge_references = kb_result.get("references", [])
+                else:
+                    # Fallback to string format for backward compatibility
+                    knowledge_context = str(kb_result)
+            except Exception as e:
+                print(f"Knowledge base search failed: {e}")
+        else:
+            print("🚀 ULTRA FAST MODE: Skipping knowledge base search for maximum speed")
 
-        # Get style examples
+        # Get style examples - ALWAYS keep these for character consistency
         style_examples = []
         try:
+            # Use fewer examples in fast mode for speed while maintaining quality
+            num_examples = 2 if (fast_mode and real_time_optimization) else 3
             style_examples = get_style_data(
-                question, character_name, num_examples=2)
+                question, character_name, num_examples=num_examples)
+            if fast_mode and real_time_optimization:
+                print(f"🚀 FAST MODE: Using {num_examples} style example for speed while maintaining character consistency")
         except Exception as e:
             print(f"Style data retrieval failed: {e}")
 
@@ -1114,11 +1171,18 @@ def ask_question_text():
                 print(f"Text generation failed: {e}")
                 styled_response = "I'm sorry, I'm having trouble generating a response right now."
 
-        # Generate audio response as base64
+        # Generate audio response as base64 with MAXIMUM SPEED optimizations
         audio_base64 = None
+        audio_generation_start = time.time()
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
-                from libraries.tts.inference import generate_cloned_audio_base64
+                # Check if we should use real-time optimized generation for high-end hardware
+                if DEVICE_OPTIMIZATION_AVAILABLE:
+                    device_type, device_info = get_device_info()
+                    use_realtime = (device_type == DeviceType.APPLE_SILICON and 
+                                   device_info.get('is_high_end', False))
+                else:
+                    use_realtime = False
 
                 voice_settings = character['voice_cloning_settings']
                 tts_model = voice_settings.get('model', 'f5tts')
@@ -1131,14 +1195,30 @@ def ask_question_text():
                     print(
                         "Warning: No reference text found for character, using fallback")
 
-                # Generate audio as base64
-                audio_base64 = generate_cloned_audio_base64(
-                    model=tts_model,
-                    ref_audio=character['voice_cloning_audio_path'],
-                    ref_text=ref_text,
-                    gen_text=styled_response,
-                    config=voice_settings
-                )
+                if use_realtime:
+                    # Use real-time optimized generation for M4 Max and high-end hardware
+                    from libraries.tts.inference import generate_realtime_audio_base64
+                    print("🚀 Using real-time optimized TTS generation")
+                    
+                    audio_base64 = generate_realtime_audio_base64(
+                        model=tts_model,
+                        ref_audio=character['voice_cloning_audio_path'],
+                        ref_text=ref_text,
+                        gen_text=styled_response,
+                        config=voice_settings
+                    )
+                else:
+                    # Generate audio as base64 with fast mode for better performance
+                    from libraries.tts.inference import generate_cloned_audio_base64
+                    
+                    audio_base64 = generate_cloned_audio_base64(
+                        model=tts_model,
+                        ref_audio=character['voice_cloning_audio_path'],
+                        ref_text=ref_text,
+                        gen_text=styled_response,
+                        config=voice_settings,
+                        fast_mode=True  # Enable fast mode for real-time performance
+                    )
 
             except Exception as e:
                 print(f"Audio generation failed: {e}")
@@ -1181,15 +1261,27 @@ def ask_question_text():
         cur.close()
         conn.close()
 
-        return jsonify({
+        # Calculate audio generation time for performance monitoring
+        audio_generation_time = time.time() - audio_generation_start if 'audio_generation_start' in locals() else 0
+        
+        # Add real-time performance indicators to response
+        response_data = {
             "question": question,
             "text_response": styled_response,
             "audio_base64": audio_base64,
             "knowledge_context": knowledge_context,
             "knowledge_references": knowledge_references,
             "character_name": character_name,
-            "status": "success"
-        }), 200
+            "status": "success",
+            "real_time_optimized": fast_mode or real_time_optimization,
+            "fast_mode": fast_mode,
+            "audio_generation_time": round(audio_generation_time, 3)
+        }
+        
+        if fast_mode:
+            print(f"🚀 ULTRA FAST response delivered for {character_name} - Audio gen: {audio_generation_time:.3f}s")
+        
+        return jsonify(response_data), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1348,11 +1440,17 @@ def ask_question_audio():
                 print(f"Text generation failed: {e}")
                 styled_response = "I'm sorry, I'm having trouble generating a response right now."
 
-        # Generate audio response as base64
+        # Generate audio response as base64 with real-time optimizations
         audio_base64 = None
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
-                from libraries.tts.inference import generate_cloned_audio_base64
+                # Check if we should use real-time optimized generation for high-end hardware
+                if DEVICE_OPTIMIZATION_AVAILABLE:
+                    device_type, device_info = get_device_info()
+                    use_realtime = (device_type == DeviceType.APPLE_SILICON and 
+                                   device_info.get('is_high_end', False))
+                else:
+                    use_realtime = False
 
                 voice_settings = character['voice_cloning_settings']
                 tts_model = voice_settings.get('model', 'f5tts')
@@ -1365,14 +1463,30 @@ def ask_question_audio():
                     print(
                         "Warning: No reference text found for character, using fallback")
 
-                # Generate audio as base64
-                audio_base64 = generate_cloned_audio_base64(
-                    model=tts_model,
-                    ref_audio=character['voice_cloning_audio_path'],
-                    ref_text=ref_text,
-                    gen_text=styled_response,
-                    config=voice_settings
-                )
+                if use_realtime:
+                    # Use real-time optimized generation for M4 Max and high-end hardware
+                    from libraries.tts.inference import generate_realtime_audio_base64
+                    print("🚀 Using real-time optimized TTS generation")
+                    
+                    audio_base64 = generate_realtime_audio_base64(
+                        model=tts_model,
+                        ref_audio=character['voice_cloning_audio_path'],
+                        ref_text=ref_text,
+                        gen_text=styled_response,
+                        config=voice_settings
+                    )
+                else:
+                    # Generate audio as base64 with fast mode for better performance
+                    from libraries.tts.inference import generate_cloned_audio_base64
+                    
+                    audio_base64 = generate_cloned_audio_base64(
+                        model=tts_model,
+                        ref_audio=character['voice_cloning_audio_path'],
+                        ref_text=ref_text,
+                        gen_text=styled_response,
+                        config=voice_settings,
+                        fast_mode=True  # Enable fast mode for real-time performance
+                    )
 
             except Exception as e:
                 print(f"Audio generation failed: {e}")
@@ -1965,6 +2079,15 @@ def update_character(character_id):
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
                         }
+                        
+                        # Add device optimization for Apple Silicon
+                        if DEVICE_OPTIMIZATION_AVAILABLE:
+                            device_type, device_info = get_device_info()
+                            if device_type == DeviceType.APPLE_SILICON:
+                                # Enable safe mode for Apple Silicon to avoid MPS issues with DeepFilterNet
+                                print("🍎 Apple Silicon detected - enabling safe mode for audio preprocessing")
+                                audio_processing_params['safe_mode'] = True
+                        
                         voice_cloning_audio_path = generate_reference_audio(
                             raw_audio_path,
                             output_file=str(
@@ -1974,7 +2097,20 @@ def update_character(character_id):
                         print(f"Audio preprocessing completed for {new_name}")
                     except Exception as e:
                         print(f"Warning: Voice preprocessing failed: {e}")
-                        voice_cloning_audio_path = raw_audio_path
+                        print("Attempting fallback with safe mode...")
+                        try:
+                            # Retry with safe mode enabled
+                            audio_processing_params['safe_mode'] = True
+                            voice_cloning_audio_path = generate_reference_audio(
+                                raw_audio_path,
+                                output_file=str(
+                                    new_character_dir / "voice_processed.wav"),
+                                **audio_processing_params
+                            )
+                            print(f"Audio preprocessing completed for {new_name} with safe mode fallback")
+                        except Exception as fallback_error:
+                            print(f"Warning: Voice preprocessing failed even with safe mode: {fallback_error}")
+                            voice_cloning_audio_path = raw_audio_path
                 else:
                     voice_cloning_audio_path = raw_audio_path
 

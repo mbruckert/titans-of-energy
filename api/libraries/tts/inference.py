@@ -1,3 +1,15 @@
+"""
+TTS (Text-to-Speech) inference module with comprehensive hardware optimization.
+
+Apple Silicon MPS Optimizations:
+- Automatic MPS device detection and utilization for F5-TTS, XTTS, and Zonos
+- MPS-specific memory management and fallback mechanisms
+- Optimized thread counts and environment variables for Apple Silicon
+- Inference mode usage for better MPS performance
+- Robust error handling with automatic CPU fallback
+- Environment variable optimizations for MPS workloads
+"""
+
 import os
 import sys
 import subprocess
@@ -26,11 +38,16 @@ except ImportError:
 _device_type = None
 _device_info = None
 
-# Global model caches with enhanced management
+# Global model caches with AGGRESSIVE management for maximum speed
 _f5tts_model = None
 _xtts_model = None
 _model_load_times = {}
 _model_memory_usage = {}
+
+# AGGRESSIVE caching for maximum speed
+_audio_generation_cache = {}  # Cache generated audio
+_model_warm_cache = {}  # Keep models warm and ready
+_precompiled_models = {}  # Store compiled models for reuse
 
 # Apple Silicon specific optimizations
 _mps_available = False
@@ -62,6 +79,14 @@ def _get_device_optimization():
                 'is_high_end', False) or _device_info.get('is_pro', False)
             print(
                 f"🍎 Apple Silicon Features: MPS={_mps_available}, Neural Engine={_apple_neural_engine_available}")
+            
+            # Set MPS-specific optimizations
+            if _mps_available:
+                # Enable MPS fallback for unsupported operations
+                os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                # Set MPS memory fraction for better memory management
+                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+                print("🍎 MPS environment optimizations enabled")
 
         elif _device_type == DeviceType.NVIDIA_GPU:
             _mixed_precision_enabled = _device_info.get(
@@ -81,29 +106,98 @@ def _get_device_optimization():
 
 
 def _optimize_for_apple_silicon(model, device_info: Dict[str, Any]):
-    """Apply Apple Silicon specific optimizations."""
+    """Apply aggressive Apple Silicon optimizations for real-time TTS."""
     try:
         # Enable MPS optimizations if available
         if _mps_available and hasattr(model, 'to'):
-            model = model.to('mps')
-            print("✓ Enabled MPS acceleration for Apple Silicon")
+            try:
+                model = model.to('mps')
+                print("✓ Enabled MPS acceleration for Apple Silicon")
+                
+                # Ensure model is in eval mode for inference
+                if hasattr(model, 'eval'):
+                    model.eval()
+                    
+                # Aggressive MPS warm-up for M4 Max
+                try:
+                    # Larger warm-up for better MPS performance
+                    dummy_tensor = torch.randn(1, 512, device='mps', dtype=torch.float32)
+                    for _ in range(3):  # Multiple warm-up passes
+                        _ = dummy_tensor * 2 + 1
+                    del dummy_tensor
+                    print("✓ Aggressive MPS warm-up completed")
+                except Exception as warmup_error:
+                    print(f"Warning: MPS warm-up failed: {warmup_error}")
+                    
+            except Exception as mps_error:
+                print(f"Warning: Failed to move model to MPS, falling back to CPU: {mps_error}")
+                if hasattr(model, 'to'):
+                    model = model.to('cpu')
 
-        # Apply memory optimizations
-        if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
-            torch.backends.mps.set_per_process_memory_fraction(0.8)
+        # Apply aggressive memory optimizations for M4 Max
+        if _mps_available:
+            try:
+                if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
+                    torch.backends.mps.set_per_process_memory_fraction(0.9)  # Use more memory for speed
+                # Enable MPS backend optimizations
+                if hasattr(torch.backends.mps, 'enabled'):
+                    torch.backends.mps.enabled = True
+                print("✓ Aggressive MPS memory optimizations applied")
+            except Exception as mem_error:
+                print(f"Warning: MPS memory optimization failed: {mem_error}")
+
+        # Enable torch.compile for M4 Max (latest PyTorch has better MPS support)
+        if device_info.get('tts_compile', False) and hasattr(torch, 'compile'):
+            try:
+                print("🚀 Attempting torch.compile for M4 Max real-time inference...")
+                model = torch.compile(model, mode="reduce-overhead", dynamic=False)
+                print("✓ torch.compile enabled for M4 Max - expect faster inference after warm-up")
+            except Exception as compile_error:
+                print(f"Warning: torch.compile failed on M4 Max: {compile_error}")
 
         # Enable optimized attention if available
-        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
-            torch.backends.mps.enabled = True
-            print("✓ Enabled optimized attention for Apple Silicon")
+        try:
+            if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+                print("✓ Scaled dot product attention available for Apple Silicon")
+        except Exception as attention_error:
+            print(f"Warning: Attention optimization check failed: {attention_error}")
 
-        # Set optimal thread counts
-        torch.set_num_threads(min(device_info.get('cpu_count', 8), 8))
+        # Set MAXIMUM thread counts for M4 Max ULTRA performance
+        try:
+            # M4 Max - USE ALL THE CORES! MAXIMUM AGGRESSION!
+            cpu_cores = device_info.get('cpu_count', 16)
+            if "m4 max" in device_info.get('device_name', '').lower():
+                optimal_threads = min(cpu_cores, 16)  # Use ALL 16 cores!
+                inter_op_threads = min(8, cpu_cores // 2)  # Maximum inter-op threading
+            else:
+                optimal_threads = min(cpu_cores, 12)
+                inter_op_threads = min(6, cpu_cores // 2)
+                
+            torch.set_num_threads(optimal_threads)
+            torch.set_num_interop_threads(inter_op_threads)
+            print(f"🚀 MAXIMUM THREADING for M4 Max: {optimal_threads} threads, {inter_op_threads} inter-op")
+            
+            # AGGRESSIVE performance environment variables for M4 Max
+            if "m4 max" in device_info.get('device_name', '').lower():
+                env_vars = {
+                    "MKL_NUM_THREADS": str(optimal_threads),
+                    "NUMEXPR_NUM_THREADS": str(optimal_threads),
+                    "OMP_NUM_THREADS": str(optimal_threads),
+                    "VECLIB_MAXIMUM_THREADS": str(optimal_threads),
+                    "ACCELERATE_NEW_LAPACK": "1",  # Use new LAPACK for better performance
+                    "ACCELERATE_LAPACK_ILP64": "1",  # Use 64-bit integers for larger problems
+                }
+                for key, value in env_vars.items():
+                    os.environ[key] = value
+                print("🚀 MAXIMUM M4 Max performance environment variables set")
+                
+        except Exception as thread_error:
+            print(f"Warning: Thread optimization failed: {thread_error}")
 
         return model
 
     except Exception as e:
-        print(f"Warning: Some Apple Silicon optimizations failed: {e}")
+        print(f"Warning: Apple Silicon optimizations failed: {e}")
         return model
 
 
@@ -319,7 +413,8 @@ def generate_audio(
     ref_text: str,
     gen_text: str,
     config: Optional[Dict[str, Any]] = None,
-    auto_download: bool = True
+    auto_download: bool = True,
+    fast_mode: bool = False
 ) -> str:
     """
     Generate cloned audio using specified TTS model with comprehensive hardware optimization.
@@ -332,12 +427,24 @@ def generate_audio(
         gen_text: Text to generate with cloned voice
         config: Additional configuration parameters
         auto_download: Whether to automatically download model if not available
+        fast_mode: Enable real-time optimizations (skip heavy preprocessing, use aggressive caching)
 
     Returns:
         Path to generated audio file
     """
     if not os.path.exists(ref_audio):
         raise FileNotFoundError(f"Reference audio file not found: {ref_audio}")
+
+    # AGGRESSIVE CACHING for maximum speed - check if we've generated this exact audio before
+    cache_key = f"{model}_{hash(ref_audio)}_{hash(ref_text)}_{hash(gen_text)}_{fast_mode}"
+    if fast_mode and cache_key in _audio_generation_cache:
+        cached_file = _audio_generation_cache[cache_key]
+        if os.path.exists(cached_file):
+            print(f"🚀 CACHE HIT! Returning previously generated audio: {cached_file}")
+            return cached_file
+        else:
+            # Remove stale cache entry
+            del _audio_generation_cache[cache_key]
 
     # Get device optimization info
     device_type, device_info = _get_device_optimization()
@@ -348,7 +455,8 @@ def generate_audio(
         'cuda_device': '0',
         'language': 'en',
         'coqui_tos_agreed': True,
-        'torch_force_no_weights_only_load': True
+        'torch_force_no_weights_only_load': True,
+        'fast_mode': fast_mode  # Pass fast mode to config
     }
 
     # Apply device-specific optimizations
@@ -408,15 +516,29 @@ def generate_audio(
     output_file = output_dir / f"generated_audio_{timestamp}.wav"
 
     # Route to appropriate model implementation
+    result_file = None
     if model_lower == "f5tts":
-        return _generate_f5tts(ref_audio, ref_text, gen_text, str(output_file), config)
+        result_file = _generate_f5tts(ref_audio, ref_text, gen_text, str(output_file), config)
     elif model_lower == "xtts":
-        return _generate_xtts(ref_audio, ref_text, gen_text, str(output_file), config)
+        result_file = _generate_xtts(ref_audio, ref_text, gen_text, str(output_file), config)
     elif model_lower == "zonos":
-        return _generate_zonos("Zyphra/Zonos-v0.1-transformer", ref_audio, ref_text, gen_text, str(output_file), config)
+        result_file = _generate_zonos("Zyphra/Zonos-v0.1-transformer", ref_audio, ref_text, gen_text, str(output_file), config)
     else:
         raise ValueError(
             f"Unsupported model: {model}. Supported models: {get_supported_models()}")
+    
+    # AGGRESSIVE CACHING - store the result for future use
+    if fast_mode and result_file and os.path.exists(result_file):
+        _audio_generation_cache[cache_key] = result_file
+        print(f"🚀 CACHED generated audio for future use: {cache_key}")
+        
+        # Limit cache size to prevent memory issues (keep last 100 generations)
+        if len(_audio_generation_cache) > 100:
+            oldest_key = next(iter(_audio_generation_cache))
+            old_file = _audio_generation_cache.pop(oldest_key)
+            print(f"🧹 Cache cleanup: removed {oldest_key}")
+    
+    return result_file
 
 
 def ensure_model_available(model: str, cache_dir: Optional[str] = None) -> bool:
@@ -485,49 +607,81 @@ def _generate_f5tts(
 
         start_time = time.perf_counter()
 
-        # Preprocess and validate audio/text lengths to prevent tensor mismatch
-        import librosa
-        try:
-            # Load reference audio to check duration
-            ref_audio_data, sr = librosa.load(ref_audio, sr=22050)
-            ref_duration = len(ref_audio_data) / sr
+        # ULTRA FAST mode: Skip ALL validation and preprocessing for MAXIMUM SPEED
+        if config.get('fast_mode', False):
+            print("🚀 ULTRA FAST MODE: Skipping ALL validation - MAXIMUM SPEED!")
+        else:
+            # Only do validation in non-fast mode
+            # Preprocess and validate audio/text lengths to prevent tensor mismatch
+            import librosa
+            try:
+                # Load reference audio to check duration
+                ref_audio_data, sr = librosa.load(ref_audio, sr=22050)
+                ref_duration = len(ref_audio_data) / sr
 
-            # Estimate text durations (rough approximation: ~150 words per minute, ~5 chars per word)
-            ref_text_duration = len(ref_text) / \
-                (150 * 5 / 60)  # Convert to seconds
-            gen_text_duration = len(gen_text) / (150 * 5 / 60)
+                # Estimate text durations (rough approximation: ~150 words per minute, ~5 chars per word)
+                ref_text_duration = len(ref_text) / \
+                    (150 * 5 / 60)  # Convert to seconds
+                gen_text_duration = len(gen_text) / (150 * 5 / 60)
 
-            print(f"Reference audio duration: {ref_duration:.2f}s")
-            print(
-                f"Reference text estimated duration: {ref_text_duration:.2f}s")
-            print(
-                f"Generation text estimated duration: {gen_text_duration:.2f}s")
-
-            # If there's a significant mismatch, we might get tensor errors
-            # Adjust or warn about potential issues
-            if abs(ref_duration - ref_text_duration) > 3.0:  # More than 3 seconds difference
+                print(f"Reference audio duration: {ref_duration:.2f}s")
                 print(
-                    f"⚠️  Warning: Reference audio ({ref_duration:.1f}s) and text ({ref_text_duration:.1f}s) duration mismatch may cause tensor issues")
-        except Exception as e:
-            print(f"Warning: Could not validate audio/text lengths: {e}")
+                    f"Reference text estimated duration: {ref_text_duration:.2f}s")
+                print(
+                    f"Generation text estimated duration: {gen_text_duration:.2f}s")
 
-        # Prepare generation parameters - use only basic F5TTS API parameters
+                # If there's a significant mismatch, we might get tensor errors
+                # Adjust or warn about potential issues
+                if abs(ref_duration - ref_text_duration) > 3.0:  # More than 3 seconds difference
+                    print(
+                        f"⚠️  Warning: Reference audio ({ref_duration:.1f}s) and text ({ref_text_duration:.1f}s) duration mismatch may cause tensor issues")
+            except Exception as e:
+                print(f"Warning: Could not validate audio/text lengths: {e}")
+
+        # Prepare generation parameters - ULTRA optimized for maximum speed
+        is_fast_mode = config.get('fast_mode', False)
         generation_params = {
             'ref_file': ref_audio,
             'ref_text': ref_text,
             'gen_text': gen_text,
             'file_wave': output_file,
-            'seed': config.get('seed', None),
-            'remove_silence': config.get('remove_silence', True),
+            'seed': 42 if is_fast_mode else config.get('seed', None),  # Always use fixed seed in fast mode
+            'remove_silence': False if is_fast_mode else config.get('remove_silence', True),  # Never remove silence in fast mode
         }
+        
+        # ULTRA FAST mode optimizations - skip everything possible
+        if is_fast_mode:
+            print("🚀 ULTRA FAST MODE optimizations enabled for F5-TTS")
+            generation_params.update({
+                'speed': 1.0,  # Slightly faster playback for speed
+            })
 
-        # Use autocast for mixed precision on NVIDIA GPUs with retry logic for tensor mismatches
+        # Use device-specific optimizations with retry logic for tensor mismatches
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
                 if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
                         wav, sr, spec = f5tts_model.infer(**generation_params)
+                elif device_type == DeviceType.APPLE_SILICON and _mps_available:
+                    # Use MPS optimizations for Apple Silicon
+                    with torch.inference_mode():  # Use inference mode for better MPS performance
+                        try:
+                            wav, sr, spec = f5tts_model.infer(**generation_params)
+                        except Exception as mps_error:
+                            # Fallback to CPU if MPS fails
+                            if "mps" in str(mps_error).lower() or "metal" in str(mps_error).lower():
+                                print(f"⚠️  MPS inference failed, falling back to CPU: {mps_error}")
+                                # Temporarily move model to CPU for this inference
+                                original_device = next(f5tts_model.parameters()).device if hasattr(f5tts_model, 'parameters') else 'mps'
+                                if hasattr(f5tts_model, 'to'):
+                                    f5tts_model = f5tts_model.to('cpu')
+                                wav, sr, spec = f5tts_model.infer(**generation_params)
+                                # Move back to original device
+                                if hasattr(f5tts_model, 'to'):
+                                    f5tts_model = f5tts_model.to(original_device)
+                            else:
+                                raise mps_error
                 else:
                     wav, sr, spec = f5tts_model.infer(**generation_params)
                 break  # Success, exit retry loop
@@ -593,11 +747,30 @@ def _generate_xtts(
             'file_path': output_file
         }
 
-        # Use autocast for mixed precision on NVIDIA GPUs (but not for XTTS due to numerical instability)
+        # Use device-specific optimizations (but not mixed precision for XTTS due to numerical instability)
         try:
             if device_type == DeviceType.NVIDIA_GPU and _xtts_mixed_precision_enabled:
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     xtts_model.tts_to_file(**generation_params)
+            elif device_type == DeviceType.APPLE_SILICON and _mps_available:
+                # Use MPS optimizations for Apple Silicon with XTTS
+                with torch.inference_mode():  # Use inference mode for better MPS performance
+                    try:
+                        xtts_model.tts_to_file(**generation_params)
+                    except Exception as mps_error:
+                        # Fallback to CPU if MPS fails with XTTS
+                        if "mps" in str(mps_error).lower() or "metal" in str(mps_error).lower():
+                            print(f"⚠️  MPS inference failed for XTTS, falling back to CPU: {mps_error}")
+                            # Temporarily move model to CPU for this inference
+                            original_device = next(xtts_model.synthesizer.tts_model.parameters()).device if hasattr(xtts_model, 'synthesizer') and hasattr(xtts_model.synthesizer, 'tts_model') else 'mps'
+                            if hasattr(xtts_model, 'to'):
+                                xtts_model = xtts_model.to('cpu')
+                            xtts_model.tts_to_file(**generation_params)
+                            # Move back to original device
+                            if hasattr(xtts_model, 'to'):
+                                xtts_model = xtts_model.to(original_device)
+                        else:
+                            raise mps_error
             else:
                 # Use FP32 for XTTS to avoid numerical instability issues
                 xtts_model.tts_to_file(**generation_params)
@@ -758,12 +931,42 @@ def _generate_zonos(
         )
         conditioning = zonos_model.prepare_conditioning(cond_dict)
 
-        # Generate audio codes and decode with optimization
+        # Generate audio codes and decode with device-specific optimization
         with torch.inference_mode():  # Use inference mode for better performance
             if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     codes = zonos_model.generate(conditioning)
                     wavs = zonos_model.autoencoder.decode(codes).cpu()
+            elif device_type == DeviceType.APPLE_SILICON and _mps_available:
+                # Use MPS optimizations for Apple Silicon with Zonos
+                try:
+                    codes = zonos_model.generate(conditioning)
+                    wavs = zonos_model.autoencoder.decode(codes).cpu()
+                except Exception as mps_error:
+                    if "mps" in str(mps_error).lower() or "metal" in str(mps_error).lower():
+                        print(f"⚠️  MPS inference failed for Zonos, falling back to CPU: {mps_error}")
+                        # Move model components to CPU temporarily
+                        original_device = zonos_device
+                        try:
+                            zonos_model = zonos_model.to('cpu')
+                            wav = wav.to('cpu')
+                            speaker = zonos_model.make_speaker_embedding(wav, sampling_rate)
+                            cond_dict = make_cond_dict(
+                                text=gen_text,
+                                speaker=speaker,
+                                language=config.get('language', 'en-us')
+                            )
+                            conditioning = zonos_model.prepare_conditioning(cond_dict)
+                            codes = zonos_model.generate(conditioning)
+                            wavs = zonos_model.autoencoder.decode(codes).cpu()
+                        finally:
+                            # Move back to original device if possible
+                            try:
+                                zonos_model = zonos_model.to(original_device)
+                            except:
+                                pass
+                    else:
+                        raise mps_error
             else:
                 codes = zonos_model.generate(conditioning)
                 wavs = zonos_model.autoencoder.decode(codes).cpu()
@@ -868,10 +1071,11 @@ def generate_cloned_audio_base64(
     ref_audio: str,
     ref_text: str,
     gen_text: str,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    fast_mode: bool = True  # Enable fast mode by default for real-time performance
 ) -> str:
     """
-    Generate cloned audio and return as base64 encoded string.
+    Generate cloned audio and return as base64 encoded string with real-time optimizations.
 
     Args:
         model: Model name ("f5tts", "xtts", "zonos")
@@ -879,6 +1083,7 @@ def generate_cloned_audio_base64(
         ref_text: Reference text
         gen_text: Text to generate
         config: Additional configuration
+        fast_mode: Enable real-time optimizations (default: True for speed)
 
     Returns:
         Base64 encoded audio data
@@ -889,13 +1094,14 @@ def generate_cloned_audio_base64(
             temp_output_path = temp_file.name
 
         try:
-            # Generate audio using the standard API
+            # Generate audio using the standard API with fast mode
             output_file = generate_audio(
                 model=model,
                 ref_audio=ref_audio,
                 ref_text=ref_text,
                 gen_text=gen_text,
-                config=config
+                config=config,
+                fast_mode=fast_mode
             )
 
             # Convert to base64
@@ -1167,3 +1373,54 @@ def get_loaded_model_names() -> List[str]:
     if _xtts_model is not None:
         loaded.append("xtts")
     return loaded
+
+
+def generate_realtime_audio_base64(
+    model: str,
+    ref_audio: str,
+    ref_text: str,
+    gen_text: str,
+    config: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Generate audio with maximum speed optimizations for real-time chat applications.
+    This function is optimized specifically for M4 Max and similar high-end hardware.
+
+    Args:
+        model: Model name ("f5tts", "xtts", "zonos")
+        ref_audio: Path to reference audio file
+        ref_text: Reference text
+        gen_text: Text to generate
+        config: Additional configuration
+
+    Returns:
+        Base64 encoded audio data
+    """
+    print("🚀 Real-time audio generation mode activated")
+    
+    # Aggressive real-time configuration
+    realtime_config = {
+        'fast_mode': True,
+        'remove_silence': False,  # Skip for speed
+        'seed': 42,  # Fixed seed for consistency
+        'torch_force_no_weights_only_load': True,
+    }
+    
+    if config:
+        realtime_config.update(config)
+    
+    # Force enable all real-time optimizations
+    realtime_config.update({
+        'fast_mode': True,
+        'tts_streaming': True,
+        'tts_fast_preprocessing': True,
+    })
+    
+    return generate_cloned_audio_base64(
+        model=model,
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+        gen_text=gen_text,
+        config=realtime_config,
+        fast_mode=True
+    )

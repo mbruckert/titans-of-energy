@@ -1,4 +1,4 @@
-export const API_BASE_URL = 'https://21yutww8lv65lc-5000.proxy.runpod.net';
+export const API_BASE_URL = 'http://localhost:5000';
 
 export const API_ENDPOINTS = {
   // Character endpoints

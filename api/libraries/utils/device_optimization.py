@@ -224,11 +224,11 @@ def _get_apple_silicon_info() -> Dict[str, Any]:
     except:
         cpu_brand = "Apple Silicon"
 
-    # Determine performance tier
+    # Determine performance tier - M4 Max/Ultra are the most powerful Apple Silicon chips to date
     is_high_end = any(chip in cpu_brand.lower() for chip in [
-                      "m1 max", "m1 ultra", "m2 max", "m2 ultra", "m3 max", "m3 ultra"])
+                      "m1 max", "m1 ultra", "m2 max", "m2 ultra", "m3 max", "m3 ultra", "m4 max", "m4 ultra"])
     is_pro = any(chip in cpu_brand.lower()
-                 for chip in ["m1 pro", "m2 pro", "m3 pro"]) or is_high_end
+                 for chip in ["m1 pro", "m2 pro", "m3 pro", "m4 pro"]) or is_high_end
 
     return {
         "device_name": cpu_brand,
@@ -238,24 +238,34 @@ def _get_apple_silicon_info() -> Dict[str, Any]:
         "torch_device": "mps" if _check_mps_available() else "cpu",
         "optimization_level": "high" if is_high_end else ("medium" if is_pro else "basic"),
 
-        # TTS optimizations
-        "tts_batch_size": 4 if is_high_end else 2,
+        # TTS optimizations - MAXIMUM SPEED for M4 Max real-time inference
+        "tts_batch_size": 16 if ("m4 max" in cpu_brand.lower()) else (8 if is_high_end else 2),  # DOUBLE the batch size
         "tts_use_gpu": _check_mps_available(),
         "tts_precision": "float32",  # MPS works better with float32
-        "tts_compile": False,  # torch.compile not fully supported on MPS
+        "tts_compile": True if ("m4 max" in cpu_brand.lower()) else False,  # Enable torch.compile for M4 Max
+        "tts_use_mps": _check_mps_available(),  # Explicit MPS flag for TTS
+        "tts_mps_fallback": True,  # Enable MPS fallback to CPU
+        "tts_streaming": True,  # Enable streaming inference for real-time
+        "tts_chunk_size": 256,  # SMALLER chunks for faster response
+        "tts_fast_preprocessing": True,  # Skip heavy audio preprocessing for speed
+        "tts_model_warming": True,  # Keep models warm for instant inference
+        "tts_aggressive_caching": True,  # Aggressive response caching
+        "tts_skip_validation": True,  # Skip all audio validation for speed
+        "tts_parallel_processing": True,  # Enable parallel processing
+        "tts_memory_preallocation": True,  # Pre-allocate memory buffers
 
-        # LLM optimizations
+        # LLM optimizations - MAXIMUM M4 Max performance
         "llm_gpu_layers": 0,  # Use CPU for GGUF on Apple Silicon
-        "llm_batch_size": 2048 if is_high_end else 1024,
-        "llm_context_length": 8192 if is_high_end else 4096,
-        # Apple Silicon works well with fewer threads
-        "llm_threads": min(cpu_count, 6),
+        "llm_batch_size": 4096 if ("m4 max" in cpu_brand.lower()) else (2048 if is_high_end else 1024),  # LARGER batches
+        "llm_context_length": 16384 if ("m4 max" in cpu_brand.lower()) else (8192 if is_high_end else 4096),  # LARGER context
+        # M4 Max with 16 cores - USE ALL OF THEM!
+        "llm_threads": min(cpu_count, 14 if ("m4 max" in cpu_brand.lower()) else 6),  # AGGRESSIVE threading
         "llm_use_metal": True,  # Use Metal for llama.cpp
         "llm_use_mlock": False,  # Disable mlock on macOS
 
-        # STT optimizations
+        # STT optimizations - M4 Max has 40-core GPU for better parallel processing
         "stt_device": "mps" if _check_mps_available() else "cpu",
-        "stt_batch_size": 8 if is_high_end else 4,
+        "stt_batch_size": 12 if ("m4 max" in cpu_brand.lower()) else (8 if is_high_end else 4),
         "stt_precision": "float32",
 
         # Audio processing optimizations
@@ -411,9 +421,23 @@ def get_optimized_config(base_config: Dict[str, Any], device_type: DeviceType, d
             "compile_model": False,
         })
 
-        # Set MPS environment variables
+        # Set MPS environment variables for MAXIMUM performance
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+        # AGGRESSIVE MPS optimizations for TTS workloads
+        os.environ["PYTORCH_MPS_ALLOCATOR_POLICY"] = "garbage_collection"
+        # MAXIMUM Apple Silicon performance settings
+        os.environ["METAL_DEVICE_WRAPPER_TYPE"] = "1"  # Use Metal directly
+        os.environ["METAL_FORCE_INTEL_GPU"] = "0"  # Force discrete GPU
+        os.environ["PYTORCH_MPS_PREFER_METAL"] = "1"  # Prefer Metal over CPU
+        # AGGRESSIVE threading for M4 Max
+        cpu_cores = device_info.get('cpu_count', 8)
+        max_threads = str(min(cpu_cores, 14))
+        os.environ["OMP_NUM_THREADS"] = max_threads
+        os.environ["MKL_NUM_THREADS"] = max_threads
+        os.environ["NUMEXPR_NUM_THREADS"] = max_threads
+        os.environ["VECLIB_MAXIMUM_THREADS"] = max_threads
+        print(f"🚀 Set MAXIMUM threading environment variables: {max_threads} threads")
 
     else:  # CPU or AMD
         optimized_config.update({

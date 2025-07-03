@@ -454,10 +454,12 @@ def generate_reference_audio(
     fade_length_ms: int = 50,
     bass_boost: bool = True,
     treble_boost: bool = True,
-    compression: bool = True
+    compression: bool = True,
+    fast_mode: bool = False,
+    safe_mode: bool = False
 ) -> str:
     """
-    Clean, enhance, and process reference audio for voice cloning.
+    Clean, enhance, and process reference audio for voice cloning with real-time optimizations.
 
     Args:
         audio_file: Path to input audio file
@@ -472,6 +474,8 @@ def generate_reference_audio(
         bass_boost: Whether to apply bass boost
         treble_boost: Whether to apply treble boost
         compression: Whether to apply dynamic range compression
+        fast_mode: Enable real-time optimizations (minimal processing for speed)
+        safe_mode: Force CPU-only processing to avoid device compatibility issues
 
     Returns:
         Path to processed audio file
@@ -479,6 +483,8 @@ def generate_reference_audio(
     Note:
         To disable all audio processing, set skip_all_processing=True or 
         set all of clean_audio, remove_silence, and enhance_audio to False.
+        fast_mode=True provides a balance between quality and speed for real-time applications.
+        safe_mode=True forces CPU processing to avoid MPS/CUDA device issues.
         Alternatively, use preprocess_audio=False in voice_cloning_settings 
         when creating a character to bypass this function entirely.
     """
@@ -500,6 +506,28 @@ def generate_reference_audio(
             sf.copy_audio(audio_file, output_file)
         return output_file
 
+    # ULTRA FAST mode: ZERO processing for maximum speed
+    if fast_mode:
+        print("🚀 ULTRA FAST MODE: ZERO audio preprocessing - MAXIMUM SPEED!")
+        # For maximum speed, just create a symbolic link or copy with zero validation
+        try:
+            if os.path.exists(output_file):
+                os.remove(output_file)
+            # Use hard link for instant "copy" if possible, otherwise fast copy
+            try:
+                os.link(audio_file, output_file)
+                print(f"✓ INSTANT link created: {output_file}")
+            except (OSError, NotImplementedError):
+                # Fallback to fastest possible copy
+                import shutil
+                shutil.copy2(audio_file, output_file)
+                print(f"✓ FAST copy completed: {output_file}")
+        except Exception as e:
+            print(f"Warning: Fast copy failed: {e}, using fallback")
+            if audio_file != output_file:
+                sf.copy_audio(audio_file, output_file)
+        return output_file
+
     # If all processing options are disabled, just copy the file
     if not any([clean_audio, remove_silence, enhance_audio]):
         if audio_file != output_file:
@@ -513,7 +541,7 @@ def generate_reference_audio(
         # Process according to specified order
         for step in preprocessing_order:
             if step == 'clean' and clean_audio:
-                current_file = _clean_audio(current_file, temp_files)
+                current_file = _clean_audio(current_file, temp_files, safe_mode=safe_mode)
             elif step == 'remove_silence' and remove_silence:
                 current_file = _remove_silence(
                     current_file, temp_files, top_db, fade_length_ms)
@@ -537,7 +565,7 @@ def generate_reference_audio(
                 pass
 
 
-def _clean_audio(input_file: str, temp_files: List[str]) -> str:
+def _clean_audio(input_file: str, temp_files: List[str], safe_mode: bool = False) -> str:
     """Clean audio using DeepFilterNet for noise reduction with comprehensive hardware optimization."""
     temp_file = tempfile.mktemp(suffix='.wav')
     temp_files.append(temp_file)
@@ -546,98 +574,104 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
         # Get device optimization info
         device_type, device_info = _get_device_optimization()
 
-        # Initialize the DeepFilterNet model with device optimization
-        model, state, _ = init_df()
-
-        # Apply comprehensive device-specific optimizations
-        if DEVICE_OPTIMIZATION_AVAILABLE:
+        # Determine target device before initializing model
+        target_device = "cpu"  # Default fallback
+        use_mps = False
+        
+        if safe_mode:
+            print("🛡️  Safe mode enabled - forcing CPU processing for DeepFilterNet")
+            target_device = "cpu"
+        elif DEVICE_OPTIMIZATION_AVAILABLE:
             if device_type == DeviceType.NVIDIA_GPU:
-                # NVIDIA GPU optimizations
-                try:
-                    device = torch.device("cuda:0")
-                    model = model.to(device)
+                target_device = "cuda:0"
+            elif device_type == DeviceType.APPLE_SILICON:
+                if torch.backends.mps.is_available():
+                    # Check if MPS is actually working for DeepFilterNet
+                    try:
+                        # Test MPS compatibility with a simple tensor operation
+                        test_tensor = torch.randn(1, 1, device="mps")
+                        _ = test_tensor * 2  # Simple operation to test MPS
+                        target_device = "mps"
+                        use_mps = True
+                    except Exception as mps_test_error:
+                        print(f"⚠️  MPS test failed: {mps_test_error}")
+                        print("Falling back to CPU for DeepFilterNet")
+                        target_device = "cpu"
 
+        # Initialize the DeepFilterNet model
+        model, state, _ = init_df()
+        
+        # Move model to target device with proper error handling
+        model_device = "cpu"  # Track actual device
+        
+        if target_device != "cpu":
+            try:
+                model = model.to(target_device)
+                model_device = target_device
+                
+                # Apply device-specific optimizations after successful move
+                if device_type == DeviceType.NVIDIA_GPU:
                     # Enable mixed precision if supported
                     if device_info.get('mixed_precision', True):
                         try:
                             model = model.half()
-                            print(
-                                f"✓ Using mixed precision (FP16) for DeepFilterNet on {device_info.get('device_name', 'GPU')}")
+                            print(f"✓ Using mixed precision (FP16) for DeepFilterNet on {device_info.get('device_name', 'GPU')}")
                         except Exception as e:
-                            print(
-                                f"Warning: Mixed precision failed for DeepFilterNet: {e}")
+                            print(f"Warning: Mixed precision failed for DeepFilterNet: {e}")
 
                     # Apply torch.compile for high-end GPUs (but be cautious with mixed precision)
                     if device_info.get('is_high_end', False) and hasattr(torch, 'compile'):
                         # torch.compile can be problematic with DeepFilterNet + mixed precision
                         if device_info.get('mixed_precision', True):
-                            print(
-                                "⚠️  Skipping torch.compile for DeepFilterNet with mixed precision (known compatibility issues)")
+                            print("⚠️  Skipping torch.compile for DeepFilterNet with mixed precision (known compatibility issues)")
                         else:
                             try:
-                                model = torch.compile(
-                                    model, mode="reduce-overhead")
-                                print(
-                                    "✓ Applied torch.compile optimization to DeepFilterNet")
+                                model = torch.compile(model, mode="reduce-overhead")
+                                print("✓ Applied torch.compile optimization to DeepFilterNet")
                             except Exception as e:
-                                print(
-                                    f"Warning: torch.compile failed for DeepFilterNet: {e}")
+                                print(f"Warning: torch.compile failed for DeepFilterNet: {e}")
 
                     # Set CUDA optimizations
                     torch.backends.cudnn.benchmark = True
                     torch.backends.cudnn.enabled = True
+                    print(f"✓ Using NVIDIA GPU acceleration for audio cleaning on {device_info.get('device_name', 'GPU')}")
 
-                    print(
-                        f"✓ Using NVIDIA GPU acceleration for audio cleaning on {device_info.get('device_name', 'GPU')}")
+                elif device_type == DeviceType.APPLE_SILICON and use_mps:
+                    # Apply MPS optimizations
+                    if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
+                        torch.backends.mps.set_per_process_memory_fraction(0.8)
 
-                except Exception as e:
-                    print(f"Warning: Could not move DeepFilterNet to GPU: {e}")
+                    # Set optimal thread counts for Apple Silicon
+                    optimal_threads = min(device_info.get('cpu_count', 8), 8)
+                    torch.set_num_threads(optimal_threads)
+                    print(f"✓ Using MPS acceleration for audio cleaning on {device_info.get('device_name', 'Apple Silicon')}")
+                    print(f"✓ Optimized thread count: {optimal_threads}")
+                    
+            except Exception as device_error:
+                print(f"⚠️  Could not move DeepFilterNet to {target_device}: {device_error}")
+                print("Falling back to CPU processing")
+                model_device = "cpu"
+                # Model is already on CPU, no need to move it back
 
-            elif device_type == DeviceType.APPLE_SILICON:
-                # Apple Silicon optimizations
-                try:
-                    if torch.backends.mps.is_available():
-                        device = torch.device("mps")
-                        model = model.to(device)
-
-                        # Apply MPS optimizations
-                        if hasattr(torch.backends.mps, 'set_per_process_memory_fraction'):
-                            torch.backends.mps.set_per_process_memory_fraction(
-                                0.8)
-
-                        # Set optimal thread counts for Apple Silicon
-                        optimal_threads = min(
-                            device_info.get('cpu_count', 8), 8)
-                        torch.set_num_threads(optimal_threads)
-
-                        print(
-                            f"✓ Using MPS acceleration for audio cleaning on {device_info.get('device_name', 'Apple Silicon')}")
-                        print(f"✓ Optimized thread count: {optimal_threads}")
-                    else:
-                        # CPU fallback with optimized thread count
-                        optimal_threads = min(
-                            device_info.get('cpu_count', 8), 8)
-                        torch.set_num_threads(optimal_threads)
-                        print(
-                            f"✓ Using optimized CPU processing for audio cleaning with {optimal_threads} threads")
-
-                except Exception as e:
-                    print(
-                        f"Warning: Could not optimize DeepFilterNet for Apple Silicon: {e}")
-            else:
-                # CPU optimizations
-                cpu_count = device_info.get('cpu_count', 4)
-                optimal_threads = min(cpu_count, 8)
-                torch.set_num_threads(optimal_threads)
-                print(
-                    f"✓ Using CPU processing for audio cleaning with {optimal_threads} threads")
+        # Apply CPU optimizations if using CPU
+        if model_device == "cpu":
+            if DEVICE_OPTIMIZATION_AVAILABLE:
+                if device_type == DeviceType.APPLE_SILICON:
+                    optimal_threads = min(device_info.get('cpu_count', 8), 8)
+                    torch.set_num_threads(optimal_threads)
+                    print(f"✓ Using optimized CPU processing for audio cleaning with {optimal_threads} threads")
+                else:
+                    cpu_count = device_info.get('cpu_count', 4)
+                    optimal_threads = min(cpu_count, 8)
+                    torch.set_num_threads(optimal_threads)
+                    print(f"✓ Using CPU processing for audio cleaning with {optimal_threads} threads")
 
         # Read and process audio
         audio_data, sample_rate = sf.read(input_file, always_2d=True)
 
         # Determine target precision early
         target_dtype = torch.float32
-        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
+        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU and model_device == "cuda:0":
             mixed_precision_enabled = device_info.get('mixed_precision', True)
             if mixed_precision_enabled and hasattr(model, 'dtype') and model.dtype == torch.float16:
                 target_dtype = torch.float16
@@ -650,22 +684,16 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
             sample_rate = state.sr()
 
         # Convert to target precision and create tensor
+        audio_data = audio_data.astype(np.float32).T
+        audio_tensor = torch.from_numpy(audio_data)
+
+        # Move tensor to same device as model
+        audio_tensor = audio_tensor.to(model_device)
+        
+        # Convert to target precision after moving to device
         if target_dtype == torch.float16:
-            audio_data = audio_data.astype(
-                np.float32).T  # Create as float32 first
-            audio_tensor = torch.from_numpy(audio_data)
-        else:
-            audio_data = audio_data.astype(np.float32).T
-            audio_tensor = torch.from_numpy(audio_data)
-
-        # Move tensor to same device as model and convert to target precision
-        if hasattr(model, 'device'):
-            audio_tensor = audio_tensor.to(model.device)
-
-            # Convert to target precision after moving to device
-            if target_dtype == torch.float16:
-                audio_tensor = audio_tensor.to(dtype=target_dtype)
-                print("✓ Audio tensor converted to FP16 after device placement")
+            audio_tensor = audio_tensor.to(dtype=target_dtype)
+            print("✓ Audio tensor converted to FP16 after device placement")
 
         # Enhance audio with device-specific optimization
         # Note: DeepFilterNet can be sensitive to mixed precision with complex numbers
@@ -676,12 +704,39 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
                 enhanced_audio = enhance(model, state, audio_tensor)
             except RuntimeError as e:
                 error_msg = str(e)
-                if ("type torch.float16" in error_msg and "torch.float32" in error_msg) or \
-                   ("backend='inductor'" in error_msg and ("Half" in error_msg or "Float" in error_msg)):
-                    print(
-                        f"⚠️  Precision/compilation mismatch detected: {error_msg}")
-                    print(
-                        "🔄 Attempting to fix by ensuring tensor precision consistency...")
+                if ("device" in error_msg.lower() and ("cpu" in error_msg or "mps" in error_msg or "cuda" in error_msg)):
+                    print(f"⚠️  Device mismatch detected: {error_msg}")
+                    print("🔄 Attempting to fix by ensuring tensor and model are on the same device...")
+                    
+                    # Try to fix device mismatch
+                    try:
+                        # Ensure both model and tensor are on the same device
+                        if hasattr(model, 'device'):
+                            actual_model_device = str(model.device)
+                            print(f"Model is on: {actual_model_device}")
+                            print(f"Tensor is on: {audio_tensor.device}")
+                            
+                            # Move tensor to match model device
+                            audio_tensor = audio_tensor.to(model.device)
+                            print(f"✓ Moved tensor to {model.device}")
+                            
+                            enhanced_audio = enhance(model, state, audio_tensor)
+                            print("✓ Audio enhancement successful after device fix")
+                        else:
+                            raise e
+                    except Exception as device_retry_error:
+                        print(f"⚠️  Device fix failed: {device_retry_error}")
+                        print("🔄 Falling back to CPU processing...")
+                        # Fall back to CPU processing
+                        model = model.cpu()
+                        audio_tensor = audio_tensor.cpu()
+                        enhanced_audio = enhance(model, state, audio_tensor)
+                        print("✓ Audio enhancement successful with CPU fallback")
+                        
+                elif ("type torch.float16" in error_msg and "torch.float32" in error_msg) or \
+                     ("backend='inductor'" in error_msg and ("Half" in error_msg or "Float" in error_msg)):
+                    print(f"⚠️  Precision/compilation mismatch detected: {error_msg}")
+                    print("🔄 Attempting to fix by ensuring tensor precision consistency...")
 
                     # Try to fix precision mismatch
                     if hasattr(model, 'dtype'):
@@ -689,13 +744,10 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
                         print(f"✓ Converted audio tensor to {model.dtype}")
 
                         try:
-                            enhanced_audio = enhance(
-                                model, state, audio_tensor)
-                            print(
-                                "✓ Audio enhancement successful after precision fix")
+                            enhanced_audio = enhance(model, state, audio_tensor)
+                            print("✓ Audio enhancement successful after precision fix")
                         except RuntimeError as retry_error:
-                            print(
-                                f"⚠️  Still failing after precision fix: {retry_error}")
+                            print(f"⚠️  Still failing after precision fix: {retry_error}")
                             print("🔄 Falling back to FP32 processing...")
                             # Fall back to FP32 processing
                             audio_tensor = audio_tensor.to(dtype=torch.float32)
@@ -703,12 +755,9 @@ def _clean_audio(input_file: str, temp_files: List[str]) -> str:
                             if hasattr(model, 'dtype') and model.dtype == torch.float16:
                                 # Convert model back to FP32 for this operation
                                 model = model.float()
-                                print(
-                                    "✓ Converted model to FP32 for fallback processing")
-                            enhanced_audio = enhance(
-                                model, state, audio_tensor)
-                            print(
-                                "✓ Audio enhancement successful with FP32 fallback")
+                                print("✓ Converted model to FP32 for fallback processing")
+                            enhanced_audio = enhance(model, state, audio_tensor)
+                            print("✓ Audio enhancement successful with FP32 fallback")
                     else:
                         raise e
                 else:

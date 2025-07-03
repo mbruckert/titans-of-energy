@@ -40,6 +40,9 @@ const Chatbot = () => {
     const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
     const [autoPlayAudio, setAutoPlayAudio] = useState(true);
     const [expandedReferences, setExpandedReferences] = useState<Set<number>>(new Set());
+    const [fastModeEnabled, setFastModeEnabled] = useState(true); // Enable fast mode by default for M4 Max
+    const [isRealTimeOptimized, setIsRealTimeOptimized] = useState(false);
+    const [pendingAutoPlayAudio, setPendingAutoPlayAudio] = useState<string | null>(null);
 
     // Get character data from location state
     const characterId = location.state?.characterId;
@@ -61,6 +64,23 @@ const Chatbot = () => {
             }
         };
     }, [currentAudio]);
+
+    // Handle auto-play when messages are updated
+    useEffect(() => {
+        if (pendingAutoPlayAudio && autoPlayAudio && messages.length > 0) {
+            const lastMessage = messages[messages.length - 1];
+            // Only auto-play if the last message is from the bot and has audio
+            if (!lastMessage.isUser && lastMessage.audioBase64 && !isPlaying && !currentAudio) {
+                const messageIndex = messages.length - 1;
+                setTimeout(() => {
+                    playAudioFromBase64(pendingAutoPlayAudio, messageIndex);
+                    setPendingAutoPlayAudio(null);
+                }, 100);
+            } else {
+                setPendingAutoPlayAudio(null);
+            }
+        }
+    }, [messages, pendingAutoPlayAudio, autoPlayAudio, isPlaying, currentAudio]);
 
     const loadCharacterModels = async () => {
         try {
@@ -180,16 +200,22 @@ const Chatbot = () => {
         setError(null);
 
         try {
-            // Call the API
+            // Call the API with real-time optimizations
+            const requestBody = {
+                character_id: characterId,
+                question: currentInput,
+                fast_mode: fastModeEnabled, // Enable fast mode for real-time performance
+                real_time_optimization: true // Request real-time optimizations
+            };
+
+            console.log('🚀 Sending request with optimizations:', requestBody);
+            
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ASK_QUESTION_TEXT}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({
-                    character_id: characterId,
-                    question: currentInput,
-                }),
+                body: JSON.stringify(requestBody),
             });
 
             if (!response.ok) {
@@ -199,6 +225,12 @@ const Chatbot = () => {
             const data = await response.json();
 
             if (data.status === 'success') {
+                // Check if real-time optimizations were applied
+                if (data.real_time_optimized) {
+                    setIsRealTimeOptimized(true);
+                    console.log('🚀 Real-time optimizations applied on M4 Max!');
+                }
+                
                 // Add bot message
                 const botMessage: Message = {
                     text: data.text_response,
@@ -208,23 +240,23 @@ const Chatbot = () => {
                     knowledgeReferences: data.knowledge_references || [],
                 };
                 
-                // Debug logging for audio issues
+                // Debug logging for audio issues and optimizations
                 if (!data.audio_base64) {
                     console.warn('No audio base64 received from API. Character may not have voice cloning configured.');
                     console.log('API Response:', data);
+                } else if (fastModeEnabled) {
+                    console.log(`⚡ Fast mode audio generated in ~${data.generation_time || 'unknown'}ms`);
                 }
                 
                 setMessages(prev => {
                     const newMessages = [...prev, botMessage];
-                    // Auto-play audio if enabled and audio is available
-                    if (autoPlayAudio && data.audio_base64) {
-                        // Use setTimeout to ensure the message is rendered first
-                        setTimeout(() => {
-                            playAudioFromBase64(data.audio_base64, newMessages.length - 1);
-                        }, 100);
-                    }
                     return newMessages;
                 });
+
+                // Set pending auto-play audio if enabled and audio is available
+                if (autoPlayAudio && data.audio_base64) {
+                    setPendingAutoPlayAudio(data.audio_base64);
+                }
             } else {
                 throw new Error(data.error || 'Failed to get response');
             }
@@ -274,8 +306,11 @@ const Chatbot = () => {
 
     const playAudioFromBase64 = (base64Audio: string, messageIndex?: number) => {
         try {
-            // Stop current audio if playing
-            stopCurrentAudio();
+            // Stop current audio if playing to prevent overlap
+            if (isPlaying || currentAudio) {
+                console.log('Audio already playing, stopping current audio first');
+                stopCurrentAudio();
+            }
 
             // Convert base64 to audio data
             const audioData = base64ToAudioData(base64Audio);
@@ -289,19 +324,15 @@ const Chatbot = () => {
             const audioUrl = URL.createObjectURL(audioBlob);
 
             const audio = new Audio(audioUrl);
+            
+            // Set state before attempting to play
             setCurrentAudio(audio);
             setIsPlaying(true);
             if (messageIndex !== undefined) {
                 setPlayingMessageIndex(messageIndex);
             }
             
-            audio.play().catch(err => {
-                console.warn('Failed to play audio:', err);
-                setError('Failed to play audio. Please check your audio settings.');
-                setIsPlaying(false);
-                setPlayingMessageIndex(null);
-            });
-
+            // Set up event handlers before playing
             audio.onended = () => {
                 setCurrentAudio(null);
                 setIsPlaying(false);
@@ -315,25 +346,43 @@ const Chatbot = () => {
                 setError('Audio playback failed. The audio data may be corrupted.');
                 setIsPlaying(false);
                 setPlayingMessageIndex(null);
+                setCurrentAudio(null);
                 // Clean up object URL
                 URL.revokeObjectURL(audioUrl);
             };
+
+            // Attempt to play
+            audio.play().catch(err => {
+                console.warn('Failed to play audio:', err);
+                setError('Failed to play audio. Please check your audio settings.');
+                setIsPlaying(false);
+                setPlayingMessageIndex(null);
+                setCurrentAudio(null);
+                // Clean up object URL
+                URL.revokeObjectURL(audioUrl);
+            });
+
         } catch (err) {
             console.warn('Error playing audio:', err);
             setError('Error playing audio.');
+            // Reset state on error
+            setIsPlaying(false);
+            setPlayingMessageIndex(null);
+            setCurrentAudio(null);
         }
     };
 
     const toggleAudioPlayback = (audioBase64: string, messageIndex: number) => {
         if (isPlaying && playingMessageIndex === messageIndex) {
             // Pause current audio
-            if (currentAudio) {
-                currentAudio.pause();
-                setIsPlaying(false);
-            }
+            stopCurrentAudio();
         } else {
-            // Play audio
-            playAudioFromBase64(audioBase64, messageIndex);
+            // Stop any currently playing audio first, then play the new one
+            stopCurrentAudio();
+            // Small delay to ensure the previous audio is fully stopped
+            setTimeout(() => {
+                playAudioFromBase64(audioBase64, messageIndex);
+            }, 50);
         }
     };
 
@@ -513,6 +562,26 @@ const Chatbot = () => {
                 
                 {/* Audio Controls */}
                 <div className="flex items-center space-x-2">
+                    {/* Real-time optimization indicator */}
+                    {isRealTimeOptimized && (
+                        <div className="flex items-center space-x-1 px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">
+                            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                            <span>Real-time</span>
+                        </div>
+                    )}
+                    
+                    <button
+                        onClick={() => setFastModeEnabled(!fastModeEnabled)}
+                        className={`p-2 rounded-full ${
+                            fastModeEnabled 
+                                ? "bg-blue-100 text-blue-600" 
+                                : "bg-gray-100 text-gray-600"
+                        }`}
+                        title={fastModeEnabled ? "⚡ Fast mode enabled (M4 Max optimized)" : "🎯 Quality mode (slower)"}
+                    >
+                        ⚡
+                    </button>
+                    
                     <button
                         onClick={clearChatHistory}
                         className="p-2 rounded-full bg-gray-100 text-gray-600 hover:bg-red-100 hover:text-red-600"
@@ -561,9 +630,16 @@ const Chatbot = () => {
                 ) : messages.length === 0 ? (
                     <div className="text-center text-gray-500 mt-8">
                         <p>Start a conversation with {characterName}!</p>
-                        <p className="text-sm mt-2">
-                            {autoPlayAudio ? "🔊 Audio responses will play automatically" : "🔇 Click the play button to hear responses"}
-                        </p>
+                        <div className="text-sm mt-2 space-y-1">
+                            <p>
+                                {autoPlayAudio ? "🔊 Audio responses will play automatically" : "🔇 Click the play button to hear responses"}
+                            </p>
+                            {fastModeEnabled && (
+                                <p className="text-blue-600">
+                                    ⚡ Fast mode enabled - Optimized for real-time performance
+                                </p>
+                            )}
+                        </div>
                     </div>
                 ) : (
                     messages.map((message, index) => (

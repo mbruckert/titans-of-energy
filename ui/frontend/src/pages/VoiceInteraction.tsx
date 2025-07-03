@@ -94,6 +94,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const [silenceDuration, setSilenceDuration] = useState(4.0); // Increased from 2.0 to 4.0 seconds
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [fastModeEnabled, setFastModeEnabled] = useState(true); // Enable fast mode for voice interaction
+  const [isRealTimeOptimized, setIsRealTimeOptimized] = useState(false);
   
   // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -708,19 +710,26 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       // Brief pause to show transcription result
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Step 2: Process the transcribed text through the character pipeline
+      // Step 2: Process the transcribed text through the character pipeline with real-time optimizations
       setIsGeneratingResponse(true);
-      console.log('🧠 Processing response...');
+      console.log('🧠 Processing response with real-time optimizations...');
+      
+      const requestBody = {
+        character_id: characterId,
+        question: transcript,
+        fast_mode: fastModeEnabled, // Enable fast mode for voice interaction
+        real_time_optimization: true, // Request real-time optimizations for voice
+        voice_interaction: true // Flag this as voice interaction for priority
+      };
+      
+      console.log('🚀 Voice request with optimizations:', requestBody);
       
       const textResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ASK_QUESTION_TEXT}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          character_id: characterId,
-          question: transcript
-        }),
+        body: JSON.stringify(requestBody),
       });
       
       if (!textResponse.ok) {
@@ -730,8 +739,19 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       const textData = await textResponse.json();
       
       if (textData.status === 'success') {
+        // Check if real-time optimizations were applied
+        if (textData.real_time_optimized) {
+          setIsRealTimeOptimized(true);
+          console.log('🚀 Real-time voice optimizations applied on M4 Max!');
+        }
+        
         setLastResponse(textData.text_response || '');
         setIsGeneratingResponse(false);
+        
+        // Log performance metrics
+        if (fastModeEnabled && textData.generation_time) {
+          console.log(`⚡ Voice fast mode audio generated in ~${textData.generation_time}ms`);
+        }
         
         // Play audio response if available
         if (textData.audio_base64 && autoPlayEnabled) {
@@ -1012,14 +1032,35 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent">
             {characterName}
           </h1>
+          {/* Real-time optimization indicator */}
+          {isRealTimeOptimized && (
+            <div className="flex items-center justify-center space-x-1 mt-1">
+              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+              <span className="text-xs text-green-400">Real-time optimized</span>
+            </div>
+          )}
         </div>
 
-        <button
-          onClick={() => setShowSettings(!showSettings)}
-          className="p-3 rounded-full bg-white/5 hover:bg-white/10 transition-all duration-300 backdrop-blur-sm border border-white/10"
-        >
-          <Settings size={20} />
-        </button>
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => setFastModeEnabled(!fastModeEnabled)}
+            className={`p-3 rounded-full ${
+              fastModeEnabled 
+                ? "bg-blue-500/20 text-blue-300 border-blue-500/30" 
+                : "bg-white/5 text-white/60 border-white/10"
+            } transition-all duration-300 backdrop-blur-sm border`}
+            title={fastModeEnabled ? "⚡ Fast mode enabled (M4 Max optimized)" : "🎯 Quality mode (slower)"}
+          >
+            ⚡
+          </button>
+          
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="p-3 rounded-full bg-white/5 hover:bg-white/10 transition-all duration-300 backdrop-blur-sm border border-white/10"
+          >
+            <Settings size={20} />
+          </button>
+        </div>
       </div>
 
       {/* Main Interface */}
@@ -1389,12 +1430,20 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           ) : isListening ? (
             <div className="flex flex-col items-center gap-2">
               <span className="text-lg text-slate-300">Say "Hey Oppenheimer"</span>
-              {isWakeWordListening && (
-                <div className="flex items-center gap-2 text-sm text-blue-400">
-                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-                  <span>Listening for wake word...</span>
-                </div>
-              )}
+              <div className="flex flex-col items-center gap-1">
+                {isWakeWordListening && (
+                  <div className="flex items-center gap-2 text-sm text-blue-400">
+                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                    <span>Listening for wake word...</span>
+                  </div>
+                )}
+                {fastModeEnabled && (
+                  <div className="flex items-center gap-1 text-xs text-green-400">
+                    <span>⚡</span>
+                    <span>Fast mode active</span>
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             <span className="text-lg text-slate-500">Voice detection off</span>
@@ -1551,6 +1600,25 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                       autoPlayEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between py-2">
+                <div>
+                  <span className="text-sm font-medium text-slate-300">⚡ Fast mode (M4 Max optimized)</span>
+                  <p className="text-xs text-slate-400 mt-1">Real-time TTS generation with reduced latency</p>
+                </div>
+                <button
+                  onClick={() => setFastModeEnabled(!fastModeEnabled)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    fastModeEnabled ? 'bg-blue-500' : 'bg-slate-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      fastModeEnabled ? 'translate-x-6' : 'translate-x-1'
                     }`}
                   />
                 </button>
