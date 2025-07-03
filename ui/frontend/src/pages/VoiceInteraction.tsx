@@ -94,8 +94,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const [silenceDuration, setSilenceDuration] = useState(4.0); // Increased from 2.0 to 4.0 seconds
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
-  const [fastModeEnabled, setFastModeEnabled] = useState(true); // Enable fast mode for voice interaction
-  const [isRealTimeOptimized, setIsRealTimeOptimized] = useState(false);
+
   
   // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -143,6 +142,10 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const wakeWordTimeoutRef = useRef<number | null>(null);
   const isProcessingWakeWordRef = useRef<boolean>(false);
   const restartTimeoutRef = useRef<number | null>(null);
+  const wakeWordRestartAttemptsRef = useRef<number>(0);
+  const maxRestartAttempts = 5;
+  const lastWakeWordDetectionRef = useRef<number>(0);
+  const wakeWordCooldownMs = 3000; // 3 second cooldown between wake word detections
 
   useEffect(() => {
     // Redirect if no character selected
@@ -198,97 +201,167 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
 
   // Initialize wake word detection when listening starts
   useEffect(() => {
-    if (isListening && !isWakeWordListening) {
+    if (isListening && !isWakeWordListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+      console.log('🚀 Starting wake word detection from useEffect');
       startWakeWordDetection();
     } else if (!isListening && isWakeWordListening) {
+      console.log('🛑 Stopping wake word detection from useEffect');
       stopWakeWordDetection();
     }
-  }, [isListening]);
+  }, [isListening, isRecording, isTranscribing, isGeneratingResponse, isProcessing]);
 
   const startWakeWordDetection = () => {
+    // Check if speech recognition is supported
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      console.warn('Speech recognition not supported in this browser');
+      console.warn('❌ Speech recognition not supported in this browser');
       return;
     }
 
-    // Prevent multiple instances
-    if (speechRecognitionRef.current || isWakeWordListening) {
-      console.log('⚠️ Wake word detection already running or starting');
+    // Prevent multiple instances and check conditions
+    if (speechRecognitionRef.current) {
+      console.log('⚠️ Wake word detection already running');
+      return;
+    }
+
+    if (isWakeWordListening) {
+      console.log('⚠️ Wake word detection already in listening state');
+      return;
+    }
+
+    if (!isListening || isRecording || isTranscribing || isGeneratingResponse) {
+      console.log('⚠️ Cannot start wake word detection - invalid state:', {
+        isListening,
+        isRecording,
+        isTranscribing,
+        isGeneratingResponse
+      });
+      return;
+    }
+
+    // Check restart attempts
+    if (wakeWordRestartAttemptsRef.current >= maxRestartAttempts) {
+      console.warn('❌ Max wake word restart attempts reached, stopping');
       return;
     }
 
     try {
+      console.log('🎯 Creating new speech recognition instance');
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
       
+      // Configure recognition
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-US';
       recognition.maxAlternatives = 1;
 
+      // Set up event handlers
       recognition.onstart = () => {
-        console.log('🎯 Wake word detection started');
+        console.log('✅ Wake word detection started successfully');
         setIsWakeWordListening(true);
+        wakeWordRestartAttemptsRef.current = 0; // Reset attempts on successful start
+        
+        // Clear any pending restart timeouts
+        if (restartTimeoutRef.current) {
+          clearTimeout(restartTimeoutRef.current);
+          restartTimeoutRef.current = null;
+        }
       };
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
-        // Skip if we're already processing a wake word
-        if (isProcessingWakeWordRef.current) return;
+        // Skip if we're processing or in cooldown
+        if (isProcessingWakeWordRef.current) {
+          console.log('⚠️ Skipping wake word processing - already processing');
+          return;
+        }
+
+        // Check cooldown
+        const now = Date.now();
+        if (now - lastWakeWordDetectionRef.current < wakeWordCooldownMs) {
+          console.log('⚠️ Skipping wake word processing - in cooldown period');
+          return;
+        }
         
-        const lastResult = event.results[event.results.length - 1];
-        if (lastResult && lastResult[0] && lastResult.isFinal) {
-          const transcript = lastResult[0].transcript.toLowerCase().trim();
-          console.log('🎤 Heard (final):', transcript);
-          
-          // Check for wake word variations - only check final results
-          const wakeWords = [
-            'hey oppenheimer',
-            'hi oppenheimer', 
-            'hello oppenheimer'
-          ];
-          
-          const containsWakeWord = wakeWords.some(wakeWord => 
-            transcript.includes(wakeWord)
-          );
-          
-          if (containsWakeWord && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessingWakeWordRef.current) {
-            console.log('🚀 Wake word detected! Starting recording...');
+        // Process all results, not just the last one
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const result = event.results[i];
+          if (result && result[0]) {
+            const transcript = result[0].transcript.toLowerCase().trim();
             
-            // Set processing flag to prevent multiple triggers
-            isProcessingWakeWordRef.current = true;
+            // Log both interim and final results for debugging
+            if (result.isFinal) {
+              console.log('🎤 Final transcript:', transcript);
+            } else {
+              console.log('🎤 Interim transcript:', transcript);
+            }
             
-            // Stop wake word detection immediately
-            recognition.stop();
+            // Check for wake word variations in both interim and final results
+            const wakeWords = [
+              'hey oppenheimer',
+              'hi oppenheimer', 
+              'hello oppenheimer',
+              'oppenheimer'
+            ];
             
-            // Start recording after a brief delay to ensure wake word detection has fully stopped
-            setTimeout(async () => {
-              if (!isRecording && !isTranscribing && !isGeneratingResponse) {
-                console.log('🎤 Starting recording after wake word detection...');
-                await startRecording();
+            const containsWakeWord = wakeWords.some(wakeWord => 
+              transcript.includes(wakeWord)
+            );
+            
+            if (containsWakeWord && !isRecording && !isTranscribing && !isGeneratingResponse) {
+              console.log('🚀 Wake word detected! Transcript:', transcript);
+              
+              // Set processing flag and update last detection time
+              isProcessingWakeWordRef.current = true;
+              lastWakeWordDetectionRef.current = now;
+              
+              // Stop recognition immediately
+              if (speechRecognitionRef.current) {
+                console.log('🛑 Stopping wake word detection for processing');
+                speechRecognitionRef.current.stop();
               }
-              // Reset processing flag after a delay
-              setTimeout(() => {
-                isProcessingWakeWordRef.current = false;
-                console.log('🔄 Processing flag reset - ready for next wake word');
-              }, 3000);
-            }, 800); // Longer delay to ensure audio stream is available
+              
+              // Start recording after a brief delay
+              setTimeout(async () => {
+                if (!isRecording && !isTranscribing && !isGeneratingResponse) {
+                  console.log('🎤 Starting recording after wake word detection');
+                  await startRecording();
+                } else {
+                  console.log('⚠️ Cannot start recording - invalid state');
+                }
+              }, 500);
+              
+              return; // Exit early after detection
+            }
           }
         }
       };
 
       recognition.onerror = (event) => {
-        console.error('Wake word detection error:', event);
+        console.error('❌ Wake word detection error:', event.error, event.message);
+        
+        // Clean up state
         setIsWakeWordListening(false);
         speechRecognitionRef.current = null;
         
-        // Only restart if it's not an abort error (which happens during normal stop)
-        if (event.error !== 'aborted' && isListening && !isRecording && !isTranscribing && !isGeneratingResponse) {
-          console.log('🔄 Restarting wake word detection after error...');
-          setTimeout(() => {
-            if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !speechRecognitionRef.current) {
-              startWakeWordDetection();
-            }
-          }, 3000);
+        // Handle different error types
+        if (event.error === 'aborted') {
+          console.log('ℹ️ Recognition aborted (normal during stop)');
+          return;
+        }
+        
+        if (event.error === 'not-allowed') {
+          console.error('❌ Microphone permission denied');
+          setError('Microphone permission denied. Please allow microphone access.');
+          return;
+        }
+        
+        if (event.error === 'no-speech') {
+          console.log('ℹ️ No speech detected, will restart');
+        }
+        
+        // Schedule restart for recoverable errors
+        if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+          scheduleWakeWordRestart('error');
         }
       };
 
@@ -297,49 +370,82 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
         setIsWakeWordListening(false);
         speechRecognitionRef.current = null;
         
-        // Only restart if we're not processing a wake word and still supposed to be listening
-        // And only if we haven't been stopped intentionally
-        console.log('🔍 Checking restart conditions:', {
-          isListening,
-          isRecording,
-          isTranscribing,
-          isGeneratingResponse,
-          isProcessingWakeWord: isProcessingWakeWordRef.current,
-          hasRestartTimeout: !!restartTimeoutRef.current,
-          hasSpeechRecognition: !!speechRecognitionRef.current
-        });
-        
-        if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !restartTimeoutRef.current) {
-          console.log('🔄 Scheduling wake word detection restart...');
-          restartTimeoutRef.current = window.setTimeout(() => {
-            restartTimeoutRef.current = null;
-            // Reset processing flag and restart
-            isProcessingWakeWordRef.current = false;
-            if (isListening && !speechRecognitionRef.current) {
-              console.log('🚀 Restarting wake word detection after timeout');
-              startWakeWordDetection();
-            } else {
-              console.log('⚠️ Skipping restart - conditions changed');
-            }
-          }, 2000); // Reduced delay
+        // Only restart if we should still be listening and not processing
+        if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessingWakeWordRef.current && !isProcessing) {
+          console.log('🔄 Scheduling wake word restart after end');
+          scheduleWakeWordRestart('end');
         } else {
-          console.log('⚠️ Not restarting wake word detection - conditions not met');
+          console.log('ℹ️ Not restarting wake word detection:', {
+            isListening,
+            isRecording,
+            isTranscribing,
+            isGeneratingResponse,
+            isProcessingWakeWord: isProcessingWakeWordRef.current,
+            isProcessing
+          });
         }
       };
 
+      // Store reference and start
       speechRecognitionRef.current = recognition;
       recognition.start();
       
     } catch (error) {
-      console.error('Failed to start wake word detection:', error);
+      console.error('❌ Failed to start wake word detection:', error);
+      setIsWakeWordListening(false);
+      speechRecognitionRef.current = null;
+      
+             // Schedule restart on error
+       if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+         scheduleWakeWordRestart('exception');
+       }
     }
   };
 
-  const stopWakeWordDetection = () => {
-    if (speechRecognitionRef.current) {
-      speechRecognitionRef.current.stop();
-      speechRecognitionRef.current = null;
+  const scheduleWakeWordRestart = (reason: string) => {
+    // Clear any existing restart timeout
+    if (restartTimeoutRef.current) {
+      clearTimeout(restartTimeoutRef.current);
+      restartTimeoutRef.current = null;
     }
+    
+    // Check if we should restart
+    if (wakeWordRestartAttemptsRef.current >= maxRestartAttempts) {
+      console.warn('❌ Max restart attempts reached, not scheduling restart');
+      return;
+    }
+    
+    wakeWordRestartAttemptsRef.current++;
+    const delay = Math.min(1000 * wakeWordRestartAttemptsRef.current, 5000); // Exponential backoff, max 5s
+    
+    console.log(`🔄 Scheduling wake word restart in ${delay}ms (attempt ${wakeWordRestartAttemptsRef.current}/${maxRestartAttempts}) - reason: ${reason}`);
+    
+    restartTimeoutRef.current = window.setTimeout(() => {
+      restartTimeoutRef.current = null;
+      
+      // Double-check conditions before restart
+      if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+        console.log('🚀 Restarting wake word detection');
+        // Reset processing flag before restart
+        isProcessingWakeWordRef.current = false;
+        startWakeWordDetection();
+      } else {
+        console.log('⚠️ Skipping restart - conditions changed:', {
+          isListening,
+          hasSpeechRecognition: !!speechRecognitionRef.current,
+          isRecording,
+          isTranscribing,
+          isGeneratingResponse,
+          isProcessing
+        });
+      }
+    }, delay);
+  };
+
+  const stopWakeWordDetection = () => {
+    console.log('🛑 Stopping wake word detection');
+    
+    // Clear all timeouts
     if (wakeWordTimeoutRef.current) {
       clearTimeout(wakeWordTimeoutRef.current);
       wakeWordTimeoutRef.current = null;
@@ -348,9 +454,48 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       clearTimeout(restartTimeoutRef.current);
       restartTimeoutRef.current = null;
     }
+    
+    // Stop recognition
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch (error) {
+        console.warn('⚠️ Error stopping speech recognition:', error);
+      }
+      speechRecognitionRef.current = null;
+    }
+    
+    // Reset state
     setIsWakeWordListening(false);
     isProcessingWakeWordRef.current = false;
+    wakeWordRestartAttemptsRef.current = 0;
   };
+
+  // Reset wake word processing flag when recording starts
+  useEffect(() => {
+    if (isRecording) {
+      console.log('🎤 Recording started - resetting wake word processing flag');
+      isProcessingWakeWordRef.current = false;
+    }
+  }, [isRecording]);
+
+  // Reset wake word processing flag when audio finishes playing
+  useEffect(() => {
+    if (!isPlayingResponse && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+      console.log('🔄 All processing finished - resetting wake word processing flag');
+      isProcessingWakeWordRef.current = false;
+      
+      // Restart wake word detection if listening
+      if (isListening && !speechRecognitionRef.current) {
+        console.log('🚀 Restarting wake word detection after processing complete');
+        setTimeout(() => {
+          if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+            startWakeWordDetection();
+          }
+        }, 1000);
+      }
+    }
+  }, [isPlayingResponse, isRecording, isTranscribing, isGeneratingResponse, isProcessing, isListening]);
 
   const cleanup = () => {
     if (streamRef.current) {
@@ -710,19 +855,17 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       // Brief pause to show transcription result
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Step 2: Process the transcribed text through the character pipeline with real-time optimizations
+      // Step 2: Process the transcribed text through the character pipeline
       setIsGeneratingResponse(true);
-      console.log('🧠 Processing response with real-time optimizations...');
+      console.log('🧠 Processing response...');
       
       const requestBody = {
         character_id: characterId,
         question: transcript,
-        fast_mode: fastModeEnabled, // Enable fast mode for voice interaction
-        real_time_optimization: true, // Request real-time optimizations for voice
         voice_interaction: true // Flag this as voice interaction for priority
       };
       
-      console.log('🚀 Voice request with optimizations:', requestBody);
+      console.log('🚀 Voice request:', requestBody);
       
       const textResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ASK_QUESTION_TEXT}`, {
         method: 'POST',
@@ -739,18 +882,12 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       const textData = await textResponse.json();
       
       if (textData.status === 'success') {
-        // Check if real-time optimizations were applied
-        if (textData.real_time_optimized) {
-          setIsRealTimeOptimized(true);
-          console.log('🚀 Real-time voice optimizations applied on M4 Max!');
-        }
-        
         setLastResponse(textData.text_response || '');
         setIsGeneratingResponse(false);
         
         // Log performance metrics
-        if (fastModeEnabled && textData.generation_time) {
-          console.log(`⚡ Voice fast mode audio generated in ~${textData.generation_time}ms`);
+        if (textData.audio_generation_time) {
+          console.log(`✅ Voice audio generated in ~${textData.audio_generation_time}ms`);
         }
         
         // Play audio response if available
@@ -758,13 +895,23 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           await playAudioResponse(textData.audio_base64);
         } else {
           // If auto-play is disabled, restart wake word detection immediately
-          console.log('🔄 Auto-play disabled - restarting wake word detection');
-          isProcessingWakeWordRef.current = false; // Reset processing flag
-          if (isListening && !speechRecognitionRef.current) {
-            setTimeout(() => {
+          console.log('🔄 Auto-play disabled - preparing to restart wake word detection');
+          setTimeout(() => {
+            isProcessingWakeWordRef.current = false; // Reset processing flag
+            if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+              console.log('🚀 Restarting wake word detection (auto-play disabled)');
               startWakeWordDetection();
-            }, 500);
-          }
+            } else {
+              console.log('⚠️ Not restarting wake word (auto-play disabled) - conditions not met:', {
+                isListening,
+                hasSpeechRecognition: !!speechRecognitionRef.current,
+                isRecording,
+                isTranscribing,
+                isGeneratingResponse,
+                isProcessing
+              });
+            }
+          }, 500);
         }
       } else {
         throw new Error(textData.error || 'Unknown error');
@@ -775,13 +922,23 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       setError(err instanceof Error ? err.message : 'Failed to process recording');
       
       // Restart wake word detection after error
-      console.log('🔄 Error occurred - restarting wake word detection');
-      isProcessingWakeWordRef.current = false; // Reset processing flag
-      if (isListening && !speechRecognitionRef.current) {
-        setTimeout(() => {
+      console.log('🔄 Error occurred - preparing to restart wake word detection');
+      setTimeout(() => {
+        isProcessingWakeWordRef.current = false; // Reset processing flag
+        if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+          console.log('🚀 Restarting wake word detection after error');
           startWakeWordDetection();
-        }, 1000);
-      }
+        } else {
+          console.log('⚠️ Not restarting wake word after error - conditions not met:', {
+            isListening,
+            hasSpeechRecognition: !!speechRecognitionRef.current,
+            isRecording,
+            isTranscribing,
+            isGeneratingResponse,
+            isProcessing
+          });
+        }
+      }, 1500);
     } finally {
       setIsProcessing(false);
       setIsTranscribing(false);
@@ -851,14 +1008,24 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           }
           URL.revokeObjectURL(audioUrl);
           
-          // Restart wake word detection after audio finishes
-          console.log('🔄 Audio finished - restarting wake word detection');
-          isProcessingWakeWordRef.current = false; // Reset processing flag
-          if (isListening && !speechRecognitionRef.current) {
-            setTimeout(() => {
+          // Restart wake word detection after audio finishes with better timing
+          console.log('🔄 Audio finished - preparing to restart wake word detection');
+          setTimeout(() => {
+            isProcessingWakeWordRef.current = false; // Reset processing flag
+            if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+              console.log('🚀 Restarting wake word detection after audio');
               startWakeWordDetection();
-            }, 500);
-          }
+            } else {
+              console.log('⚠️ Not restarting wake word - conditions not met:', {
+                isListening,
+                hasSpeechRecognition: !!speechRecognitionRef.current,
+                isRecording,
+                isTranscribing,
+                isGeneratingResponse,
+                isProcessing
+              });
+            }
+          }, 800); // Longer delay to ensure audio system is ready
           
           resolve();
         };
@@ -1032,27 +1199,9 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent">
             {characterName}
           </h1>
-          {/* Real-time optimization indicator */}
-          {isRealTimeOptimized && (
-            <div className="flex items-center justify-center space-x-1 mt-1">
-              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-              <span className="text-xs text-green-400">Real-time optimized</span>
-            </div>
-          )}
         </div>
 
         <div className="flex items-center space-x-2">
-          <button
-            onClick={() => setFastModeEnabled(!fastModeEnabled)}
-            className={`p-3 rounded-full ${
-              fastModeEnabled 
-                ? "bg-blue-500/20 text-blue-300 border-blue-500/30" 
-                : "bg-white/5 text-white/60 border-white/10"
-            } transition-all duration-300 backdrop-blur-sm border`}
-            title={fastModeEnabled ? "⚡ Fast mode enabled (M4 Max optimized)" : "🎯 Quality mode (slower)"}
-          >
-            ⚡
-          </button>
           
           <button
             onClick={() => setShowSettings(!showSettings)}
@@ -1377,7 +1526,6 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
         {(isRecording || isListening) && (
           <div className="text-center mb-4 text-sm text-slate-400">
             <div>Volume: {audioLevel.toFixed(4)} | Threshold: {volumeThreshold}</div>
-            <div>Voice Detected: {audioLevel > volumeThreshold ? '✅' : '❌'}</div>
             {!isRecording && (
               <div className="mt-2">
                 <span className="text-xs">Microphone test: {audioLevel > 0.001 ? '🎤 Working' : '❌ No input'}</span>
@@ -1431,16 +1579,22 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
             <div className="flex flex-col items-center gap-2">
               <span className="text-lg text-slate-300">Say "Hey Oppenheimer"</span>
               <div className="flex flex-col items-center gap-1">
-                {isWakeWordListening && (
+                {isWakeWordListening ? (
                   <div className="flex items-center gap-2 text-sm text-blue-400">
                     <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
                     <span>Listening for wake word...</span>
                   </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-sm text-yellow-400">
+                    <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                    <span>Preparing wake word detection...</span>
+                  </div>
                 )}
-                {fastModeEnabled && (
-                  <div className="flex items-center gap-1 text-xs text-green-400">
-                    <span>⚡</span>
-                    <span>Fast mode active</span>
+
+                {wakeWordRestartAttemptsRef.current > 0 && (
+                  <div className="flex items-center gap-1 text-xs text-orange-400">
+                    <span>🔄</span>
+                    <span>Restart attempts: {wakeWordRestartAttemptsRef.current}/{maxRestartAttempts}</span>
                   </div>
                 )}
               </div>
@@ -1605,24 +1759,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <span className="text-sm font-medium text-slate-300">⚡ Fast mode (M4 Max optimized)</span>
-                  <p className="text-xs text-slate-400 mt-1">Real-time TTS generation with reduced latency</p>
-                </div>
-                <button
-                  onClick={() => setFastModeEnabled(!fastModeEnabled)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    fastModeEnabled ? 'bg-blue-500' : 'bg-slate-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      fastModeEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
+
             </div>
           </div>
                  </div>

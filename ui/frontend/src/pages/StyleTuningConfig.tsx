@@ -74,9 +74,11 @@ const StyleTuningConfig = () => {
         formData.append('character_image', storedFiles.imageFile);
       }
 
-      // Add knowledge base files if available
+      // Add knowledge base files if available (support multiple files)
       if (storedFiles.knowledgeBaseFiles && storedFiles.knowledgeBaseFiles.length > 0) {
-        formData.append('knowledge_base_file', storedFiles.knowledgeBaseFiles[0]);
+        storedFiles.knowledgeBaseFiles.forEach(file => {
+          formData.append('knowledge_base_file', file);
+        });
       }
 
       // Add voice cloning audio files if available

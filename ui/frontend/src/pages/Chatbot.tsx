@@ -40,8 +40,7 @@ const Chatbot = () => {
     const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
     const [autoPlayAudio, setAutoPlayAudio] = useState(true);
     const [expandedReferences, setExpandedReferences] = useState<Set<number>>(new Set());
-    const [fastModeEnabled, setFastModeEnabled] = useState(true); // Enable fast mode by default for M4 Max
-    const [isRealTimeOptimized, setIsRealTimeOptimized] = useState(false);
+
     const [pendingAutoPlayAudio, setPendingAutoPlayAudio] = useState<string | null>(null);
 
     // Get character data from location state
@@ -200,15 +199,13 @@ const Chatbot = () => {
         setError(null);
 
         try {
-            // Call the API with real-time optimizations
+            // Call the API with optimized performance
             const requestBody = {
                 character_id: characterId,
-                question: currentInput,
-                fast_mode: fastModeEnabled, // Enable fast mode for real-time performance
-                real_time_optimization: true // Request real-time optimizations
+                question: currentInput
             };
 
-            console.log('🚀 Sending request with optimizations:', requestBody);
+            console.log('🚀 Sending request:', requestBody);
             
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ASK_QUESTION_TEXT}`, {
                 method: 'POST',
@@ -225,12 +222,6 @@ const Chatbot = () => {
             const data = await response.json();
 
             if (data.status === 'success') {
-                // Check if real-time optimizations were applied
-                if (data.real_time_optimized) {
-                    setIsRealTimeOptimized(true);
-                    console.log('🚀 Real-time optimizations applied on M4 Max!');
-                }
-                
                 // Add bot message
                 const botMessage: Message = {
                     text: data.text_response,
@@ -240,12 +231,12 @@ const Chatbot = () => {
                     knowledgeReferences: data.knowledge_references || [],
                 };
                 
-                // Debug logging for audio issues and optimizations
+                // Debug logging for audio issues
                 if (!data.audio_base64) {
                     console.warn('No audio base64 received from API. Character may not have voice cloning configured.');
                     console.log('API Response:', data);
-                } else if (fastModeEnabled) {
-                    console.log(`⚡ Fast mode audio generated in ~${data.generation_time || 'unknown'}ms`);
+                } else {
+                    console.log(`✅ Audio generated in ~${data.audio_generation_time || 'unknown'}ms`);
                 }
                 
                 setMessages(prev => {
@@ -562,25 +553,6 @@ const Chatbot = () => {
                 
                 {/* Audio Controls */}
                 <div className="flex items-center space-x-2">
-                    {/* Real-time optimization indicator */}
-                    {isRealTimeOptimized && (
-                        <div className="flex items-center space-x-1 px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">
-                            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                            <span>Real-time</span>
-                        </div>
-                    )}
-                    
-                    <button
-                        onClick={() => setFastModeEnabled(!fastModeEnabled)}
-                        className={`p-2 rounded-full ${
-                            fastModeEnabled 
-                                ? "bg-blue-100 text-blue-600" 
-                                : "bg-gray-100 text-gray-600"
-                        }`}
-                        title={fastModeEnabled ? "⚡ Fast mode enabled (M4 Max optimized)" : "🎯 Quality mode (slower)"}
-                    >
-                        ⚡
-                    </button>
                     
                     <button
                         onClick={clearChatHistory}
@@ -634,11 +606,6 @@ const Chatbot = () => {
                             <p>
                                 {autoPlayAudio ? "🔊 Audio responses will play automatically" : "🔇 Click the play button to hear responses"}
                             </p>
-                            {fastModeEnabled && (
-                                <p className="text-blue-600">
-                                    ⚡ Fast mode enabled - Optimized for real-time performance
-                                </p>
-                            )}
                         </div>
                     </div>
                 ) : (

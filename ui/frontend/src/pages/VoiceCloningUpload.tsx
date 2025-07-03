@@ -20,7 +20,6 @@ const VoiceCloningUpload = () => {
   const navigate = useNavigate();
   const [files, setFiles] = useState<File[]>([]);
   const [referenceText, setReferenceText] = useState<string>('');
-  const [generativeText, setGenerativeText] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('f5tts');
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +205,6 @@ const VoiceCloningUpload = () => {
         model: selectedModel,
         ref_audio: files.length > 0 ? files[0] : null,
         ref_text: referenceText || 'Hello, how can I help you today?',
-        gen_text: generativeText,
         ...preprocessingConfig,
         // Model-specific settings
         ...(selectedModel === 'f5tts' && f5Settings),
@@ -221,9 +219,11 @@ const VoiceCloningUpload = () => {
         formData.append('character_image', storedFiles.imageFile);
       }
 
-      // Add knowledge base files if available
+      // Add knowledge base files if available (support multiple files)
       if (storedFiles.knowledgeBaseFiles && storedFiles.knowledgeBaseFiles.length > 0) {
-        formData.append('knowledge_base_file', storedFiles.knowledgeBaseFiles[0]);
+        storedFiles.knowledgeBaseFiles.forEach(file => {
+          formData.append('knowledge_base_file', file);
+        });
       }
 
       // Add voice cloning audio files if available
@@ -287,7 +287,6 @@ const VoiceCloningUpload = () => {
     const voiceSettings = {
       model: selectedModel,
       ref_text: referenceText || 'Hello, how can I help you today?',
-      gen_text: generativeText,
       ...preprocessingConfig,
       // Model-specific settings
       ...(selectedModel === 'f5tts' && f5Settings),
@@ -427,23 +426,7 @@ const VoiceCloningUpload = () => {
         </div>
       )}
 
-      {/* Generative Text */}
-      {files.length > 0 && (
-        <div className="mb-6">
-          <label htmlFor="generativeText" className="block text-sm font-medium text-gray-700 mb-2">
-            Generative Text (optional - what you want the voice clone to output)
-          </label>
-          <textarea
-            id="generativeText"
-            value={generativeText}
-            onChange={(e) => setGenerativeText(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
-            rows={3}
-            placeholder="Leave blank to use LLM-generated text, or enter custom text for the voice clone to speak..."
-          />
-          <p className="text-xs text-gray-500 mt-1">If left blank, the LLM will generate appropriate text for the voice clone to speak.</p>
-        </div>
-      )}
+
 
       {/* Audio Preprocessing Configuration */}
       {files.length > 0 && (

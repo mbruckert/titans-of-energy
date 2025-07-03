@@ -60,7 +60,7 @@ const ModelSelection = () => {
             setError(err instanceof Error ? err.message : 'Failed to load models');
             // Fallback to default models if API fails
             setModels([
-                { id: 'gemma-3-4b', name: 'Gemma3 4B', type: 'huggingface', repo: 'google/gemma-2b', requiresKey: false, available: false, downloaded: false },
+                { id: 'google-gemma-3-4b-it-qat-q4_0-gguf', name: 'Gemma3 4B', type: 'gguf', repo: 'google/gemma-3-4b-it-qat-q4_0-gguf:gemma-3-4b-it-q4_0.gguf', requiresKey: false, available: false, downloaded: false },
                 { id: 'llama-3.2-3b', name: 'Llama 3.2 3B', type: 'huggingface', repo: 'meta-llama/Llama-3.2-3B', requiresKey: false, available: false, downloaded: false },
                 { id: 'gpt-4o', name: 'GPT-4o', type: 'openai_api', repo: 'gpt-4o', requiresKey: true, available: true, downloaded: true },
                 { id: 'gpt-4o-mini', name: 'GPT-4o-mini', type: 'openai_api', repo: 'gpt-4o-mini', requiresKey: true, available: true, downloaded: true },
@@ -75,14 +75,32 @@ const ModelSelection = () => {
             setDownloading(model.id);
             setError(null);
             
+            // Determine the correct model name and type for the backend
+            let modelName = model.repo;
+            let modelType = 'huggingface';
+            
+            if (model.type === 'openai_api') {
+                modelType = 'openai';
+            } else if (model.type === 'gguf') {
+                // GGUF models are downloaded from Hugging Face
+                modelType = 'huggingface';
+            } else if (model.type === 'huggingface') {
+                modelType = 'huggingface';
+            }
+            
+            // Validate that we have a model name
+            if (!modelName) {
+                throw new Error('Model repository name is missing');
+            }
+            
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.DOWNLOAD_MODEL}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    model_name: model.repo,
-                    model_type: model.type === 'openai_api' ? 'openai' : 'huggingface'
+                    model_name: modelName,
+                    model_type: modelType
                 }),
             });
             

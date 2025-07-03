@@ -739,13 +739,25 @@ def _generate_xtts(
 
         start_time = time.perf_counter()
 
-        # Prepare generation parameters
+        # Prepare generation parameters with model-specific settings
         generation_params = {
             'text': gen_text,
             'speaker_wav': ref_audio,
             'language': config.get('language', 'en'),
             'file_path': output_file
         }
+        
+        # Add XTTS-specific parameters if available
+        if 'repetition_penalty' in config:
+            generation_params['repetition_penalty'] = config['repetition_penalty']
+        if 'top_k' in config:
+            generation_params['top_k'] = config['top_k']
+        if 'top_p' in config:
+            generation_params['top_p'] = config['top_p']
+        if 'speed' in config:
+            generation_params['speed'] = config['speed']
+        if 'enable_text_splitting' in config:
+            generation_params['enable_text_splitting'] = config['enable_text_splitting']
 
         # Use device-specific optimizations (but not mixed precision for XTTS due to numerical instability)
         try:
@@ -923,12 +935,35 @@ def _generate_zonos(
         else:
             speaker = zonos_model.make_speaker_embedding(wav, sampling_rate)
 
-        # Generate speech using Zonos
+        # Generate speech using Zonos with model-specific settings
         cond_dict = make_cond_dict(
             text=gen_text,
             speaker=speaker,
             language=config.get('language', 'en-us')
         )
+        
+        # Add Zonos-specific emotion parameters if available
+        emotion_params = {}
+        for i in range(1, 9):  # e1 through e8
+            emotion_key = f'e{i}'
+            if emotion_key in config:
+                emotion_params[emotion_key] = config[emotion_key]
+        
+        if emotion_params:
+            cond_dict.update(emotion_params)
+        
+        # Add other Zonos-specific parameters
+        if 'seed' in config:
+            torch.manual_seed(config['seed'])
+        if 'cfg_scale' in config:
+            cond_dict['cfg_scale'] = config['cfg_scale']
+        if 'speaking_rate' in config:
+            cond_dict['speaking_rate'] = config['speaking_rate']
+        if 'frequency_max' in config:
+            cond_dict['frequency_max'] = config['frequency_max']
+        if 'pitch_standard_deviation' in config:
+            cond_dict['pitch_standard_deviation'] = config['pitch_standard_deviation']
+            
         conditioning = zonos_model.prepare_conditioning(cond_dict)
 
         # Generate audio codes and decode with device-specific optimization

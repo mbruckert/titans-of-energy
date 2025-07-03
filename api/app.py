@@ -135,7 +135,7 @@ def resolve_model_path(model_id: str) -> tuple[str, str]:
     # Define supported models with their paths
     model_configs = {
         "google-gemma-3-4b-it-qat-q4_0-gguf": {
-            "path": "./models/google_gemma-3-4b-it-qat-q4_0-gguf/gemma-3-4b-it-q4_0.gguf",
+            "path": "./models/gemma-3-4b-it-q4_0.gguf",
             "type": "gguf"
         },
         "llama-3.2-3b": {
@@ -647,7 +647,7 @@ def create_character():
             request.form.get('voice_cloning_settings', '{}'))
 
         # Extract reference text from voice cloning settings
-        voice_reference_text = voice_cloning_settings.get('reference_text', '')
+        voice_reference_text = voice_cloning_settings.get('ref_text', '')
 
         # Create character directory
         character_dir = STORAGE_DIR / name.replace(' ', '_').lower()
@@ -667,33 +667,50 @@ def create_character():
                     character_dir / f"image_{image_file.filename}")
                 image_file.save(image_path)
 
-        # Save and process knowledge base data
-        if 'knowledge_base_file' in request.files:
-            kb_file = request.files['knowledge_base_file']
-            if kb_file.filename:
-                knowledge_base_path = str(
-                    character_dir / f"knowledge_base_{kb_file.filename}")
-                kb_file.save(knowledge_base_path)
+        # Save and process knowledge base data (support multiple files)
+        kb_files = request.files.getlist('knowledge_base_file')
+        if kb_files and any(f.filename for f in kb_files):
+            try:
+                collection_name = f"{name.lower().replace(' ', '')}-knowledge"
 
-                # Process knowledge base documents
-                try:
-                    collection_name = f"{name.lower().replace(' ', '')}-knowledge"
+                # Create temporary directories for processing
+                kb_docs_dir = character_dir / "kb_docs"
+                kb_archive_dir = character_dir / "kb_archive"
+                kb_docs_dir.mkdir(exist_ok=True)
+                kb_archive_dir.mkdir(exist_ok=True)
 
-                    # Create temporary directories for processing
-                    kb_docs_dir = character_dir / "kb_docs"
-                    kb_archive_dir = character_dir / "kb_archive"
-                    kb_docs_dir.mkdir(exist_ok=True)
-                    kb_archive_dir.mkdir(exist_ok=True)
+                # Process all knowledge base files
+                kb_file_paths = []
+                for i, kb_file in enumerate(kb_files):
+                    if kb_file.filename:
+                        # Save each file
+                        kb_file_path = str(character_dir / f"knowledge_base_{i+1}_{kb_file.filename}")
+                        kb_file.save(kb_file_path)
+                        kb_file_paths.append(kb_file_path)
 
-                    # Copy the file to the docs directory for processing
-                    temp_kb_path = kb_docs_dir / kb_file.filename
-                    shutil.copy2(knowledge_base_path, temp_kb_path)
+                        # Copy the file to the docs directory for processing
+                        temp_kb_path = kb_docs_dir / kb_file.filename
+                        shutil.copy2(kb_file_path, temp_kb_path)
 
-                    # Process the documents
-                    process_documents_for_collection(
-                        str(kb_docs_dir), str(kb_archive_dir), collection_name)
-                except Exception as e:
-                    print(f"Warning: Knowledge base processing failed: {e}")
+                # Store the first file path for backward compatibility (or create a manifest)
+                if kb_file_paths:
+                    knowledge_base_path = kb_file_paths[0]  # Store first file path
+                    # Create a manifest file listing all uploaded files
+                    manifest_path = character_dir / "knowledge_base_manifest.json"
+                    with open(manifest_path, 'w') as f:
+                        json.dump({
+                            "files": [os.path.basename(path) for path in kb_file_paths],
+                            "count": len(kb_file_paths),
+                            "created_at": time.time()
+                        }, f)
+
+                # Process all documents in the directory
+                process_documents_for_collection(
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name)
+                
+                print(f"Successfully processed {len(kb_file_paths)} knowledge base files for {name}")
+            except Exception as e:
+                print(f"Warning: Knowledge base processing failed: {e}")
 
         # Save and preprocess voice cloning audio
         if 'voice_cloning_audio' in request.files:
@@ -712,9 +729,12 @@ def create_character():
                     try:
                         # Filter out parameters that don't belong to generate_reference_audio
                         # These are TTS model configuration parameters, not audio processing parameters
-                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'reference_text',
+                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'ref_text', 'reference_text',
                                            'language', 'output_dir', 'cuda_device', 'coqui_tos_agreed',
-                                           'torch_force_no_weights_only_load', 'auto_download'}
+                                           'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
+                                           'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
+                                           'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
                         audio_processing_params = {
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
@@ -1100,13 +1120,11 @@ def ask_question_text():
         data = request.get_json()
         character_id = data.get('character_id')
         question = data.get('question')
-        fast_mode = data.get('fast_mode', True)  # Enable fast mode by default
-        real_time_optimization = data.get('real_time_optimization', False)
 
         if not character_id or not question:
             return jsonify({"error": "character_id and question are required"}), 400
 
-        print(f"🚀 Processing request - Fast mode: {fast_mode}, Real-time: {real_time_optimization}")
+        print(f"🚀 Processing request with optimized performance")
 
         # Get character data
         conn = get_db_connection()
@@ -1121,35 +1139,28 @@ def ask_question_text():
 
         character_name = character['name']
 
-        # Search knowledge base - SKIP in ultra fast mode for maximum speed
+        # Search knowledge base - ALWAYS provide 3 references regardless of fast mode
         knowledge_context = ""
         knowledge_references = []
-        if not (fast_mode and real_time_optimization):
-            try:
-                kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
-                kb_result = query_collection(
-                    kb_collection, question, n_results=3, return_structured=True)
+        try:
+            kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
+            kb_result = query_collection(
+                kb_collection, question, n_results=3, return_structured=True)
 
-                if isinstance(kb_result, dict) and "references" in kb_result:
-                    knowledge_context = kb_result.get("context", "")
-                    knowledge_references = kb_result.get("references", [])
-                else:
-                    # Fallback to string format for backward compatibility
-                    knowledge_context = str(kb_result)
-            except Exception as e:
-                print(f"Knowledge base search failed: {e}")
-        else:
-            print("🚀 ULTRA FAST MODE: Skipping knowledge base search for maximum speed")
-
-        # Get style examples - ALWAYS keep these for character consistency
+            if isinstance(kb_result, dict) and "references" in kb_result:
+                knowledge_context = kb_result.get("context", "")
+                knowledge_references = kb_result.get("references", [])
+            else:
+                # Fallback to string format for backward compatibility
+                knowledge_context = str(kb_result)
+        except Exception as e:
+            print(f"Knowledge base search failed: {e}")
+        
+        # Get style examples - Use optimal number for speed while maintaining quality
         style_examples = []
         try:
-            # Use fewer examples in fast mode for speed while maintaining quality
-            num_examples = 2 if (fast_mode and real_time_optimization) else 3
             style_examples = get_style_data(
-                question, character_name, num_examples=num_examples)
-            if fast_mode and real_time_optimization:
-                print(f"🚀 FAST MODE: Using {num_examples} style example for speed while maintaining character consistency")
+                question, character_name, num_examples=2)
         except Exception as e:
             print(f"Style data retrieval failed: {e}")
 
@@ -1171,7 +1182,7 @@ def ask_question_text():
                 print(f"Text generation failed: {e}")
                 styled_response = "I'm sorry, I'm having trouble generating a response right now."
 
-        # Generate audio response as base64 with MAXIMUM SPEED optimizations
+        # Generate audio response as base64 with optimized performance
         audio_base64 = None
         audio_generation_start = time.time()
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
@@ -1208,7 +1219,7 @@ def ask_question_text():
                         config=voice_settings
                     )
                 else:
-                    # Generate audio as base64 with fast mode for better performance
+                    # Generate audio as base64 with optimized performance
                     from libraries.tts.inference import generate_cloned_audio_base64
                     
                     audio_base64 = generate_cloned_audio_base64(
@@ -1216,8 +1227,7 @@ def ask_question_text():
                         ref_audio=character['voice_cloning_audio_path'],
                         ref_text=ref_text,
                         gen_text=styled_response,
-                        config=voice_settings,
-                        fast_mode=True  # Enable fast mode for real-time performance
+                        config=voice_settings
                     )
 
             except Exception as e:
@@ -1264,7 +1274,7 @@ def ask_question_text():
         # Calculate audio generation time for performance monitoring
         audio_generation_time = time.time() - audio_generation_start if 'audio_generation_start' in locals() else 0
         
-        # Add real-time performance indicators to response
+        # Add performance indicators to response
         response_data = {
             "question": question,
             "text_response": styled_response,
@@ -1273,13 +1283,10 @@ def ask_question_text():
             "knowledge_references": knowledge_references,
             "character_name": character_name,
             "status": "success",
-            "real_time_optimized": fast_mode or real_time_optimization,
-            "fast_mode": fast_mode,
             "audio_generation_time": round(audio_generation_time, 3)
         }
         
-        if fast_mode:
-            print(f"🚀 ULTRA FAST response delivered for {character_name} - Audio gen: {audio_generation_time:.3f}s")
+        print(f"🚀 Optimized response delivered for {character_name} - Audio gen: {audio_generation_time:.3f}s")
         
         return jsonify(response_data), 200
 
@@ -1440,7 +1447,7 @@ def ask_question_audio():
                 print(f"Text generation failed: {e}")
                 styled_response = "I'm sorry, I'm having trouble generating a response right now."
 
-        # Generate audio response as base64 with real-time optimizations
+        # Generate audio response as base64 with optimized performance
         audio_base64 = None
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
@@ -1476,7 +1483,7 @@ def ask_question_audio():
                         config=voice_settings
                     )
                 else:
-                    # Generate audio as base64 with fast mode for better performance
+                    # Generate audio as base64 with optimized performance
                     from libraries.tts.inference import generate_cloned_audio_base64
                     
                     audio_base64 = generate_cloned_audio_base64(
@@ -1484,8 +1491,7 @@ def ask_question_audio():
                         ref_audio=character['voice_cloning_audio_path'],
                         ref_text=ref_text,
                         gen_text=styled_response,
-                        config=voice_settings,
-                        fast_mode=True  # Enable fast mode for real-time performance
+                        config=voice_settings
                     )
 
             except Exception as e:
@@ -1584,7 +1590,8 @@ def get_llm_models():
         # Define the models we support in the frontend
         supported_models = [
             {"id": "google-gemma-3-4b-it-qat-q4_0-gguf", "name": "Gemma3 4B", "type": "gguf",
-                "path": "./models/google_gemma-3-4b-it-qat-q4_0-gguf/gemma-3-4b-it-q4_0.gguf"},
+                "path": "./models/gemma-3-4b-it-q4_0.gguf",
+                "repo": "google/gemma-3-4b-it-qat-q4_0-gguf:gemma-3-4b-it-q4_0.gguf"},
             {"id": "llama-3.2-3b", "name": "Llama 3.2 3B",
                 "type": "huggingface", "repo": "meta-llama/Llama-3.2-3B"},
             {"id": "gpt-4o", "name": "GPT-4o",
@@ -2021,37 +2028,64 @@ def update_character(character_id):
                                  f"image_{image_file.filename}")
                 image_file.save(image_path)
 
-        # Update knowledge base if new file provided
-        if 'knowledge_base_file' in request.files:
-            kb_file = request.files['knowledge_base_file']
-            if kb_file.filename:
-                # Delete old knowledge base if it exists
+        # Update knowledge base if new files provided (support multiple files)
+        kb_files = request.files.getlist('knowledge_base_file')
+        if kb_files and any(f.filename for f in kb_files):
+            try:
+                # Delete old knowledge base files if they exist
                 if knowledge_base_path and os.path.exists(knowledge_base_path):
                     os.remove(knowledge_base_path)
+                
+                # Also clean up any existing knowledge base files and manifest
+                kb_pattern = new_character_dir / "knowledge_base_*"
+                import glob
+                for old_kb_file in glob.glob(str(kb_pattern)):
+                    if os.path.exists(old_kb_file):
+                        os.remove(old_kb_file)
+                
+                manifest_path = new_character_dir / "knowledge_base_manifest.json"
+                if manifest_path.exists():
+                    os.remove(manifest_path)
 
-                knowledge_base_path = str(
-                    new_character_dir / f"knowledge_base_{kb_file.filename}")
-                kb_file.save(knowledge_base_path)
+                collection_name = f"{new_name.lower().replace(' ', '')}-knowledge"
 
-                # Process knowledge base documents
-                try:
-                    collection_name = f"{new_name.lower().replace(' ', '')}-knowledge"
+                # Create temporary directories for processing
+                kb_docs_dir = new_character_dir / "kb_docs"
+                kb_archive_dir = new_character_dir / "kb_archive"
+                kb_docs_dir.mkdir(exist_ok=True)
+                kb_archive_dir.mkdir(exist_ok=True)
 
-                    # Create temporary directories for processing
-                    kb_docs_dir = new_character_dir / "kb_docs"
-                    kb_archive_dir = new_character_dir / "kb_archive"
-                    kb_docs_dir.mkdir(exist_ok=True)
-                    kb_archive_dir.mkdir(exist_ok=True)
+                # Process all knowledge base files
+                kb_file_paths = []
+                for i, kb_file in enumerate(kb_files):
+                    if kb_file.filename:
+                        # Save each file
+                        kb_file_path = str(new_character_dir / f"knowledge_base_{i+1}_{kb_file.filename}")
+                        kb_file.save(kb_file_path)
+                        kb_file_paths.append(kb_file_path)
 
-                    # Copy the file to the docs directory for processing
-                    temp_kb_path = kb_docs_dir / kb_file.filename
-                    shutil.copy2(knowledge_base_path, temp_kb_path)
+                        # Copy the file to the docs directory for processing
+                        temp_kb_path = kb_docs_dir / kb_file.filename
+                        shutil.copy2(kb_file_path, temp_kb_path)
 
-                    # Process the documents
-                    process_documents_for_collection(
-                        str(kb_docs_dir), str(kb_archive_dir), collection_name)
-                except Exception as e:
-                    print(f"Warning: Knowledge base processing failed: {e}")
+                # Store the first file path for backward compatibility (or create a manifest)
+                if kb_file_paths:
+                    knowledge_base_path = kb_file_paths[0]  # Store first file path
+                    # Create a manifest file listing all uploaded files
+                    with open(manifest_path, 'w') as f:
+                        json.dump({
+                            "files": [os.path.basename(path) for path in kb_file_paths],
+                            "count": len(kb_file_paths),
+                            "created_at": time.time()
+                        }, f)
+
+                # Process all documents in the directory
+                process_documents_for_collection(
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name)
+                
+                print(f"Successfully updated and processed {len(kb_file_paths)} knowledge base files for {new_name}")
+            except Exception as e:
+                print(f"Warning: Knowledge base processing failed: {e}")
 
         # Update voice cloning audio if new file provided
         if 'voice_cloning_audio' in request.files:
@@ -2072,9 +2106,12 @@ def update_character(character_id):
                 if preprocess_audio:
                     try:
                         # Filter out TTS-only parameters
-                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'reference_text',
+                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'ref_text', 'reference_text',
                                            'language', 'output_dir', 'cuda_device', 'coqui_tos_agreed',
-                                           'torch_force_no_weights_only_load', 'auto_download'}
+                                           'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
+                                           'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
+                                           'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
                         audio_processing_params = {
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
