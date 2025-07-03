@@ -20,6 +20,7 @@ const VoiceCloningUpload = () => {
   const navigate = useNavigate();
   const [files, setFiles] = useState<File[]>([]);
   const [referenceText, setReferenceText] = useState<string>('');
+  const [generativeText, setGenerativeText] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('f5tts');
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,12 +40,44 @@ const VoiceCloningUpload = () => {
     compression: true
   });
 
+  // Model-specific settings
+  const [f5Settings, setF5Settings] = useState({
+    // F5-specific settings (remove_silence is handled by preprocessingConfig)
+  });
+
+  const [xttsSettings, setXttsSettings] = useState({
+    language: 'en',
+    repetition_penalty: 1.0,
+    top_k: 50,
+    top_p: 0.8,
+    speed: 1.0,
+    enable_text_splitting: true
+  });
+
+  const [zonosSettings, setZonosSettings] = useState({
+    e1: 0.5, // happiness
+    e2: 0.5, // sadness
+    e3: 0.5, // disgust
+    e4: 0.5, // fear
+    e5: 0.5, // surprise
+    e6: 0.5, // anger
+    e7: 0.5, // other
+    e8: 0.5, // neutral
+    seed: 42,
+    cfg_scale: 1.0,
+    speaking_rate: 20,
+    frequency_max: 12000,
+    pitch_standard_deviation: 100,
+    language: 'en'
+  });
+
   // Drag and drop state for reordering
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS', description: 'High quality, fast inference' },
     { id: 'xtts', name: 'XTTS-v2', description: 'Multilingual support' },
+    { id: 'zonosv0.1', name: 'Zonos-v0.1', description: 'Early experimental TTS model' },
   ];
 
   const processingSteps = [
@@ -70,6 +103,28 @@ const VoiceCloningUpload = () => {
 
   const handlePreprocessingChange = (key: string, value: any) => {
     setPreprocessingConfig(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  // Model-specific settings handlers
+  const handleF5SettingChange = (key: string, value: any) => {
+    setF5Settings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  const handleXttsSettingChange = (key: string, value: any) => {
+    setXttsSettings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  const handleZonosSettingChange = (key: string, value: any) => {
+    setZonosSettings(prev => ({
       ...prev,
       [key]: value
     }));
@@ -149,9 +204,14 @@ const VoiceCloningUpload = () => {
       // Add voice cloning settings with preprocessing configuration
       const voiceSettings = {
         model: selectedModel,
-        reference_text: referenceText || 'Hello, how can I help you today?',
-        language: 'en',
-        ...preprocessingConfig
+        ref_audio: files.length > 0 ? files[0] : null,
+        ref_text: referenceText || 'Hello, how can I help you today?',
+        gen_text: generativeText,
+        ...preprocessingConfig,
+        // Model-specific settings
+        ...(selectedModel === 'f5tts' && f5Settings),
+        ...(selectedModel === 'xtts' && xttsSettings),
+        ...(selectedModel === 'zonosv0.1' && zonosSettings)
       };
       
       formData.append('voice_cloning_settings', JSON.stringify(voiceSettings));
@@ -226,9 +286,13 @@ const VoiceCloningUpload = () => {
     // Add voice cloning configuration with preprocessing
     const voiceSettings = {
       model: selectedModel,
-      reference_text: referenceText || 'Hello, how can I help you today?',
-      language: 'en',
-      ...preprocessingConfig
+      ref_text: referenceText || 'Hello, how can I help you today?',
+      gen_text: generativeText,
+      ...preprocessingConfig,
+      // Model-specific settings
+      ...(selectedModel === 'f5tts' && f5Settings),
+      ...(selectedModel === 'xtts' && xttsSettings),
+      ...(selectedModel === 'zonosv0.1' && zonosSettings)
     };
 
     const updatedData = {
@@ -313,6 +377,8 @@ const VoiceCloningUpload = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your audio files or drag and drop</p>
+        <p className="text-xs text-gray-500 mb-2">Accepted formats: MP3, WAV, M4A</p> 
+        <p className="text-xs text-gray-500 mb-4">Best results with 15-second clips (works with 5–60 seconds)</p>
         <input
           type="file"
           id="file-upload"
@@ -358,6 +424,24 @@ const VoiceCloningUpload = () => {
             rows={3}
             placeholder="Enter the text that matches your audio sample..."
           />
+        </div>
+      )}
+
+      {/* Generative Text */}
+      {files.length > 0 && (
+        <div className="mb-6">
+          <label htmlFor="generativeText" className="block text-sm font-medium text-gray-700 mb-2">
+            Generative Text (optional - what you want the voice clone to output)
+          </label>
+          <textarea
+            id="generativeText"
+            value={generativeText}
+            onChange={(e) => setGenerativeText(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+            rows={3}
+            placeholder="Leave blank to use LLM-generated text, or enter custom text for the voice clone to speak..."
+          />
+          <p className="text-xs text-gray-500 mt-1">If left blank, the LLM will generate appropriate text for the voice clone to speak.</p>
         </div>
       )}
 
@@ -551,6 +635,338 @@ const VoiceCloningUpload = () => {
                   </div>
                 </>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Model-Specific Settings */}
+      {files.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">{selectedModel.toUpperCase()} Model Settings</h3>
+          
+          {/* F5-TTS Settings */}
+          {selectedModel === 'f5tts' && (
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 mb-4">F5-TTS specific configuration options</p>
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-600">No additional configuration needed.</p>
+              </div>
+            </div>
+          )}
+
+          {/* XTTS-v2 Settings */}
+          {selectedModel === 'xtts' && (
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 mb-4">XTTS-v2 specific configuration options</p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                  <select
+                    value={xttsSettings.language}
+                    onChange={(e) => handleXttsSettingChange('language', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                  >
+                    <option value="en">English</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="it">Italian</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="pl">Polish</option>
+                    <option value="tr">Turkish</option>
+                    <option value="ru">Russian</option>
+                    <option value="nl">Dutch</option>
+                    <option value="cs">Czech</option>
+                    <option value="ar">Arabic</option>
+                    <option value="zh-cn">Chinese (Simplified)</option>
+                    <option value="ja">Japanese</option>
+                    <option value="ko">Korean</option>
+                    <option value="hi">Hindi</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Repetition Penalty (0-10)</label>
+                  <input
+                    type="number"
+                    value={xttsSettings.repetition_penalty}
+                    onChange={(e) => handleXttsSettingChange('repetition_penalty', parseFloat(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Top K (0-100)</label>
+                  <input
+                    type="number"
+                    value={xttsSettings.top_k}
+                    onChange={(e) => handleXttsSettingChange('top_k', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="100"
+                    step="1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Top P (0-1)</label>
+                  <input
+                    type="number"
+                    value={xttsSettings.top_p}
+                    onChange={(e) => handleXttsSettingChange('top_p', parseFloat(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Speed (0-1)</label>
+                  <input
+                    type="number"
+                    value={xttsSettings.speed}
+                    onChange={(e) => handleXttsSettingChange('speed', parseFloat(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={xttsSettings.enable_text_splitting}
+                    onChange={(e) => handleXttsSettingChange('enable_text_splitting', e.target.checked)}
+                    className="rounded border-gray-300 text-black focus:ring-black"
+                  />
+                  <span className="ml-2 text-sm font-medium text-gray-700">Enable text splitting</span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {/* Zonos Settings */}
+          {selectedModel === 'zonosv0.1' && (
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 mb-4">Zonos-v0.1 specific configuration options</p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                  <select
+                    value={zonosSettings.language}
+                    onChange={(e) => handleZonosSettingChange('language', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                  >
+                    <option value="en">English</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="it">Italian</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="pl">Polish</option>
+                    <option value="tr">Turkish</option>
+                    <option value="ru">Russian</option>
+                    <option value="nl">Dutch</option>
+                    <option value="cs">Czech</option>
+                    <option value="ar">Arabic</option>
+                    <option value="zh-cn">Chinese</option>
+                    <option value="ja">Japanese</option>
+                    <option value="hu">Hungarian</option>
+                    <option value="ko">Korean</option>
+                    <option value="hi">Hindi</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Seed</label>
+                  <input
+                    type="number"
+                    value={zonosSettings.seed}
+                    onChange={(e) => handleZonosSettingChange('seed', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">CFG Scale</label>
+                  <input
+                    type="number"
+                    value={zonosSettings.cfg_scale}
+                    onChange={(e) => handleZonosSettingChange('cfg_scale', parseFloat(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Speaking Rate (5-35)</label>
+                  <input
+                    type="number"
+                    value={zonosSettings.speaking_rate}
+                    onChange={(e) => handleZonosSettingChange('speaking_rate', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="5"
+                    max="35"
+                    step="1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Frequency Max (0-24000)</label>
+                  <input
+                    type="number"
+                    value={zonosSettings.frequency_max}
+                    onChange={(e) => handleZonosSettingChange('frequency_max', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="24000"
+                    step="100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Pitch Standard Deviation (0-500)</label>
+                  <input
+                    type="number"
+                    value={zonosSettings.pitch_standard_deviation}
+                    onChange={(e) => handleZonosSettingChange('pitch_standard_deviation', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
+                    min="0"
+                    max="500"
+                    step="10"
+                  />
+                </div>
+              </div>
+
+              {/* Emotion Parameters */}
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Emotion Parameters (0-1)</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Happiness (e1)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e1}
+                      onChange={(e) => handleZonosSettingChange('e1', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e1}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Sadness (e2)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e2}
+                      onChange={(e) => handleZonosSettingChange('e2', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e2}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Disgust (e3)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e3}
+                      onChange={(e) => handleZonosSettingChange('e3', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e3}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Fear (e4)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e4}
+                      onChange={(e) => handleZonosSettingChange('e4', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e4}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Surprise (e5)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e5}
+                      onChange={(e) => handleZonosSettingChange('e5', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e5}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Anger (e6)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e6}
+                      onChange={(e) => handleZonosSettingChange('e6', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e6}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Other (e7)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e7}
+                      onChange={(e) => handleZonosSettingChange('e7', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e7}</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Neutral (e8)</label>
+                    <input
+                      type="range"
+                      value={zonosSettings.e8}
+                      onChange={(e) => handleZonosSettingChange('e8', parseFloat(e.target.value))}
+                      className="w-full"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                    />
+                    <span className="text-xs text-gray-500">{zonosSettings.e8}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>

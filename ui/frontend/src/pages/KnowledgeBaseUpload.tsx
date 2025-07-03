@@ -70,6 +70,7 @@ const KnowledgeBaseUpload = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your files or drag and drop</p>
+        <p className="text-xs text-gray-500 mb-4">Accepted formats: TXT, PDF, DOC, DOCX</p>
         <input
           type="file"
           id="file-upload"
