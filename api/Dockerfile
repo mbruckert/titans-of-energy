@@ -70,15 +70,18 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$ENABLE_GPU" != "false" ]; th
       && apt-get install -y --no-install-recommends \
            gnupg \
            software-properties-common \
-      && wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb \
+      && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb \
       && dpkg -i cuda-keyring_1.0-1_all.deb \
       && apt-get update \
       && apt-get install -y --no-install-recommends \
            cuda-toolkit-12-1 \
+           nvidia-cuda-toolkit \
       && rm -rf /var/lib/apt/lists/* \
       && apt-get clean \
       && rm cuda-keyring_1.0-1_all.deb \
-      && echo "CUDA toolkit installed for x86_64"; \
+      && echo "CUDA toolkit installed for x86_64" \
+      && echo "Verifying CUDA installation..." \
+      && nvcc --version || echo "Warning: CUDA compiler not found in PATH"; \
     else \
       echo "Skipping CUDA installation (not x86_64 or GPU disabled)"; \
     fi
@@ -199,7 +202,26 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 # 19) Create startup script that sources platform environment
 RUN echo '#!/bin/bash' > /app/start.sh \
+ && echo 'echo "🚀 Starting Titans API..."' >> /app/start.sh \
  && echo 'source /app/platform_env.sh' >> /app/start.sh \
+ && echo '' >> /app/start.sh \
+ && echo '# GPU Detection and Validation' >> /app/start.sh \
+ && echo 'if [ "$ENABLE_GPU" = "true" ] || [ "$ENABLE_GPU" = "auto" ]; then' >> /app/start.sh \
+ && echo '  echo "🔍 Checking GPU availability..."' >> /app/start.sh \
+ && echo '  if command -v nvidia-smi >/dev/null 2>&1; then' >> /app/start.sh \
+ && echo '    echo "✓ nvidia-smi found"' >> /app/start.sh \
+ && echo '    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>/dev/null || echo "⚠️  nvidia-smi failed to query GPU"' >> /app/start.sh \
+ && echo '  else' >> /app/start.sh \
+ && echo '    echo "⚠️  nvidia-smi not found - GPU support may be limited"' >> /app/start.sh \
+ && echo '  fi' >> /app/start.sh \
+ && echo '  if [ -n "$CUDA_VISIBLE_DEVICES" ]; then' >> /app/start.sh \
+ && echo '    echo "🎯 CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"' >> /app/start.sh \
+ && echo '  fi' >> /app/start.sh \
+ && echo 'else' >> /app/start.sh \
+ && echo '  echo "💻 GPU support disabled - running in CPU mode"' >> /app/start.sh \
+ && echo 'fi' >> /app/start.sh \
+ && echo '' >> /app/start.sh \
+ && echo 'echo "🎬 Starting application..."' >> /app/start.sh \
  && echo 'exec python3 app.py' >> /app/start.sh \
  && chmod +x /app/start.sh
 

@@ -50,6 +50,8 @@ HUGGINGFACE_API_KEY=your_actual_huggingface_api_key_here
 
 ### 3. Start the Application with Docker
 
+**For CPU-only systems:**
+
 ```bash
 # Build and start all services (API, Database, Frontend)
 docker-compose up --build
@@ -57,6 +59,18 @@ docker-compose up --build
 # Or run in background
 docker-compose up --build -d
 ```
+
+**For NVIDIA GPU systems (Linux):**
+
+```bash
+# Option A: Modern GPU syntax (Docker Compose 1.28+)
+docker-compose -f docker-compose.yaml -f docker-compose.gpu.yaml up --build
+
+# Option B: Legacy GPU syntax (if Option A fails)
+docker-compose -f docker-compose.yaml -f docker-compose.gpu-legacy.yaml up --build
+```
+
+**Note**: See [GPU Setup](#gpu-setup) section below for NVIDIA GPU prerequisites.
 
 This will start:
 
@@ -180,6 +194,64 @@ The following directories persist between container restarts:
 | `CHROMA_DB_PATH`      | ChromaDB storage path             | `chroma_db`              |
 | `MODELS_DIR`          | Local models directory            | `./models`               |
 | `EMBEDDING_MODEL`     | OpenAI embedding model            | `text-embedding-ada-002` |
+
+## GPU Setup
+
+### NVIDIA GPU Support (Linux)
+
+For optimal performance with NVIDIA GPUs, you need to install the NVIDIA Container Runtime:
+
+#### Quick Setup
+
+```bash
+# Install nvidia-container-runtime
+sudo apt-get update
+sudo apt-get install -y nvidia-container-runtime
+
+# Restart Docker
+sudo systemctl restart docker
+
+# Verify GPU access
+docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+```
+
+#### Docker Compose with GPU
+
+```bash
+# Try modern syntax first
+docker-compose -f docker-compose.yaml -f docker-compose.gpu.yaml up --build
+
+# If that fails, use legacy syntax
+docker-compose -f docker-compose.yaml -f docker-compose.gpu-legacy.yaml up --build
+```
+
+#### Troubleshooting
+
+**Error: "could not select device driver nvidia"**
+
+1. Install nvidia-container-runtime: `sudo apt-get install nvidia-container-runtime`
+2. Restart Docker: `sudo systemctl restart docker`
+3. Try legacy syntax: `docker-compose -f docker-compose.yaml -f docker-compose.gpu-legacy.yaml up`
+
+**Error: "nvidia-smi not found"**
+
+1. Install NVIDIA drivers: `sudo apt-get install nvidia-driver-XXX`
+2. Reboot your system
+3. Verify with: `nvidia-smi`
+
+For detailed GPU setup instructions, see `api/README.md`.
+
+### Apple Silicon (macOS)
+
+Apple Silicon Macs are automatically optimized when running natively (not in Docker). GPU acceleration uses Metal Performance Shaders (MPS) when available.
+
+### CPU-Only Mode
+
+To disable GPU and run in CPU mode, set in your `.env` file:
+
+```env
+ENABLE_GPU=false
+```
 
 ## Additional Resources
 

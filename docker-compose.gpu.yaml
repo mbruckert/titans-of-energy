@@ -1,12 +1,23 @@
 # Docker Compose override for NVIDIA GPU support
 # Use this file only on systems with NVIDIA GPUs and Docker GPU runtime
 # Usage: docker-compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
+#
+# PREREQUISITES:
+# 1. Install NVIDIA Container Runtime: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+# 2. Restart Docker daemon after installation
+# 3. Verify with: docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+#
+# TROUBLESHOOTING:
+# - If you get "could not select device driver nvidia" error:
+#   * Install nvidia-container-runtime: sudo apt-get install nvidia-container-runtime
+#   * Restart Docker: sudo systemctl restart docker
+#   * Or try legacy syntax: docker-compose -f docker-compose.yaml -f docker-compose.gpu-legacy.yaml up
 
 version: "3.8"
 
 services:
   app:
-    # Enable GPU access for NVIDIA GPUs
+    # Modern GPU syntax (Docker Compose 1.28+)
     deploy:
       resources:
         reservations:
@@ -14,7 +25,16 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    
+    # Legacy GPU syntax (fallback - uncomment if modern syntax fails)
+    # runtime: nvidia
+    
     environment:
       # Ensure NVIDIA GPU environment variables are set
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Force GPU usage in the application
+      ENABLE_GPU: "true"
+      # CUDA specific optimizations
+      CUDA_VISIBLE_DEVICES: all
+      CUDA_LAUNCH_BLOCKING: "0"

@@ -31,6 +31,8 @@ services:
       - storage_data:/app/storage
       # Persist outputs directory (for generated content)
       - outputs_data:/app/outputs
+      # Cache directories for better performance
+      - model_cache:/app/cache
     env_file:
       - .env
     environment:
@@ -40,6 +42,10 @@ services:
       # GPU support variables (only used when NVIDIA GPU is available)
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      # Cache directories
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      WHISPER_CACHE: /app/cache/whisper
 
   frontend:
     build:
@@ -69,3 +75,4 @@ volumes:
   chroma_data:
   storage_data:
   outputs_data:
+  model_cache:
