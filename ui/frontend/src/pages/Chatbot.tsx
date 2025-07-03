@@ -1,8 +1,20 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { useVoiceToText } from "react-speakup";
 import { Mic, MicOff, Volume2, VolumeX, Play, Pause, Trash2, ChevronDown, ChevronUp, BookOpen, Search } from "lucide-react";
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+
+// Web Speech API type declarations
+declare global {
+    interface Window {
+        SpeechRecognition: any;
+        webkitSpeechRecognition: any;
+    }
+}
+
+interface SpeechRecognitionEvent extends Event {
+    results: SpeechRecognitionResultList;
+    resultIndex: number;
+}
 
 interface KnowledgeReference {
     id: number;
@@ -40,8 +52,13 @@ const Chatbot = () => {
     const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
     const [autoPlayAudio, setAutoPlayAudio] = useState(true);
     const [expandedReferences, setExpandedReferences] = useState<Set<number>>(new Set());
+    const [isManuallyEditing, setIsManuallyEditing] = useState(false);
+    const [speechTranscript, setSpeechTranscript] = useState("");
 
     const [pendingAutoPlayAudio, setPendingAutoPlayAudio] = useState<string | null>(null);
+    
+    // Speech recognition refs
+    const speechRecognitionRef = useRef<any>(null);
 
     // Get character data from location state
     const characterId = location.state?.characterId;
@@ -54,12 +71,15 @@ const Chatbot = () => {
         }
     }, [characterId]);
 
-    // Cleanup audio when component unmounts
+    // Cleanup audio and speech recognition when component unmounts
     useEffect(() => {
         return () => {
             if (currentAudio) {
                 currentAudio.pause();
                 currentAudio.currentTime = 0;
+            }
+            if (speechRecognitionRef.current) {
+                speechRecognitionRef.current.stop();
             }
         };
     }, [currentAudio]);
@@ -389,23 +409,69 @@ const Chatbot = () => {
         }
     };
 
-    const { startListening, stopListening, transcript } = useVoiceToText({
-        continuous: true,
-        lang: "en-US",
-    });
+    // Custom speech recognition functions
+    const startListening = () => {
+        if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+            setError('Speech recognition not supported in this browser');
+            return;
+        }
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+            let finalTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                }
+            }
+            if (finalTranscript) {
+                setSpeechTranscript(finalTranscript);
+            }
+        };
+
+        recognition.onerror = (event: any) => {
+            setError(`Speech recognition error: ${event.error}`);
+        };
+
+        recognition.onend = () => {
+            speechRecognitionRef.current = null;
+        };
+
+        speechRecognitionRef.current = recognition;
+        recognition.start();
+    };
+
+    const stopListening = () => {
+        if (speechRecognitionRef.current) {
+            speechRecognitionRef.current.stop();
+            speechRecognitionRef.current = null;
+        }
+    };
 
     useEffect(() => {
-        if (transcript) {
-            setInputMessage(transcript);
+        if (speechTranscript && !isManuallyEditing) {
+            setInputMessage(speechTranscript);
         }
-    }, [transcript]);
+    }, [speechTranscript, isManuallyEditing]);
 
     const handleVoiceToggle = async () => {
         try {
             if (isListening) {
                 stopListening();
                 setIsListening(false);
+                setIsManuallyEditing(false);
             } else {
+                // Clear any existing transcript before starting new recording
+                setInputMessage("");
+                setSpeechTranscript("");
+                setIsManuallyEditing(false);
+                
                 // Request microphone permission
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 stream.getTracks().forEach(track => track.stop()); // Stop the stream after getting permission
@@ -691,7 +757,15 @@ const Chatbot = () => {
                     <input
                         type="text"
                         value={inputMessage}
-                        onChange={(e) => setInputMessage(e.target.value)}
+                        onChange={(e) => {
+                            setInputMessage(e.target.value);
+                            // If the user clears the field, reset manual editing flag
+                            if (e.target.value === "") {
+                                setIsManuallyEditing(false);
+                            } else {
+                                setIsManuallyEditing(true);
+                            }
+                        }}
                         placeholder="Type your message..."
                         className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-black"
                         disabled={isLoading}

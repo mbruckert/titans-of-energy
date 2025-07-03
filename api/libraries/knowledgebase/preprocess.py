@@ -370,7 +370,6 @@ def move_processed_files(source_dir: str, target_dir: str) -> None:
             except Exception as e:
                 print(f"Error moving {filename}: {e}")
 
-
 def process_single_file(file_info: Tuple[str, str, str]) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Process a single file and return its chunks.
