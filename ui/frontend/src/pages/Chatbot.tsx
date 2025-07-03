@@ -138,14 +138,26 @@ const Chatbot = () => {
                             timestamp: new Date(entry.created_at),
                             id: entry.id
                         });
-                        // Add bot response
+                        
+                        // Parse knowledge_references if it's a string (from database JSON)
+                        let knowledgeRefs = entry.knowledge_references || [];
+                        if (typeof knowledgeRefs === 'string') {
+                            try {
+                                knowledgeRefs = JSON.parse(knowledgeRefs);
+                            } catch (e) {
+                                console.warn('Failed to parse knowledge_references:', e);
+                                knowledgeRefs = [];
+                            }
+                        }
+                        
+                        // Add bot response with properly parsed knowledge references
                         historyMessages.push({
                             text: entry.bot_response,
                             isUser: false,
                             timestamp: new Date(entry.created_at),
                             audioBase64: entry.audio_base64,
                             id: entry.id,
-                            knowledgeReferences: entry.knowledge_references || []
+                            knowledgeReferences: knowledgeRefs
                         });
                     });
                     setMessages(historyMessages);

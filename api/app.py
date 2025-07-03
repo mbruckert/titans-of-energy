@@ -1867,9 +1867,15 @@ def get_chat_history(character_id):
             # Parse knowledge_references from JSON if available
             if entry_dict.get('knowledge_references'):
                 try:
-                    entry_dict['knowledge_references'] = json.loads(
-                        entry_dict['knowledge_references'])
-                except (json.JSONDecodeError, TypeError):
+                    # If it's already a dict/list (from JSONB), keep it as is
+                    if isinstance(entry_dict['knowledge_references'], (dict, list)):
+                        pass  # Already parsed
+                    else:
+                        # If it's a string, parse it
+                        entry_dict['knowledge_references'] = json.loads(
+                            entry_dict['knowledge_references'])
+                except (json.JSONDecodeError, TypeError) as e:
+                    print(f"Warning: Failed to parse knowledge_references: {e}")
                     entry_dict['knowledge_references'] = []
             else:
                 entry_dict['knowledge_references'] = []
