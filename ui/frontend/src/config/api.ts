@@ -4,6 +4,8 @@ export const API_ENDPOINTS = {
   // Character endpoints
   GET_CHARACTERS: '/get-characters',
   GET_CHARACTER: '/get-character',
+  GET_CHARACTER_WAKEWORD: '/get-character-wakeword',
+  GET_CHARACTER_THINKING_AUDIO: '/get-character-thinking-audio',
   CREATE_CHARACTER: '/create-character',
   UPDATE_CHARACTER: '/update-character',
   DELETE_CHARACTER: '/delete-character',

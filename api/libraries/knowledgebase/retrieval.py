@@ -1,61 +1,29 @@
 """
 Knowledge base retrieval module for querying ChromaDB collections.
 
-This module handles querying ChromaDB collections using OpenAI embeddings
+This module handles querying ChromaDB collections using configurable embedding models
 and formatting results for context retrieval.
+Supports both OpenAI and open source embedding models.
 """
 
-from openai import OpenAI
 import json
 import os
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 import chromadb
 import chromadb.utils.embedding_functions as embedding_functions
 from dotenv import load_dotenv
 
+# Import unified embedding models
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+from embedding_models import get_embedding_model, EmbeddingModelType, embedding_manager
+
 # Load environment variables
 load_dotenv()
 
 # Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY must be set in environment variables")
-
 CHROMA_DB_PATH = "./chroma_db"
-EMBEDDING_MODEL = "text-embedding-ada-002"
-
-# Import new OpenAI client for embeddings
-
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Custom embedding function that uses new OpenAI API
-
-
-class CustomOpenAIEmbeddingFunction:
-    def __init__(self, api_key: str, model_name: str = "text-embedding-ada-002"):
-        self.client = OpenAI(api_key=api_key)
-        self.model_name = model_name
-
-    def __call__(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a list of texts using the new OpenAI API."""
-        try:
-            response = self.client.embeddings.create(
-                input=texts,
-                model=self.model_name
-            )
-            return [data.embedding for data in response.data]
-        except Exception as e:
-            print(f"Error generating embeddings: {e}")
-            raise
-
-
-# Initialize custom OpenAI embedding function
-openai_embedding_function = CustomOpenAIEmbeddingFunction(
-    api_key=OPENAI_API_KEY,
-    model_name=EMBEDDING_MODEL
-)
 
 # Initialize ChromaDB persistent client
 chroma_client = chromadb.PersistentClient(CHROMA_DB_PATH)
@@ -64,6 +32,7 @@ chroma_client = chromadb.PersistentClient(CHROMA_DB_PATH)
 def query_collection(
     collection_name: str,
     query: str,
+    embedding_config: Dict[str, Any],
     n_results: int = 2,
     include_metadata: bool = True,
     verbose: bool = False,
@@ -91,8 +60,20 @@ def query_collection(
         collection = chroma_client.get_or_create_collection(
             name=collection_name)
 
-        # Generate query embedding
-        query_embedding = openai_embedding_function([query])
+        # Generate query embedding using configured model
+        model_id = embedding_config.get("model_id", "default")
+        model_type = embedding_config.get("model_type", "sentence_transformers")
+        model_name = embedding_config.get("model_name", "all-MiniLM-L6-v2")
+        
+        # Get or create embedding model
+        embedding_model = get_embedding_model(
+            model_id=model_id,
+            model_type=model_type,
+            model_name=model_name,
+            config=embedding_config.get("config", {})
+        )
+        
+        query_embedding = [embedding_model.embed_text(query)]
 
         if verbose:
             print(f"Query: {query}")
@@ -281,6 +262,7 @@ def get_collection_info(collection_name: str) -> Optional[Dict]:
 def search_with_filters(
     collection_name: str,
     query: str,
+    embedding_config: Dict[str, Any],
     where_filter: Optional[Dict] = None,
     n_results: int = 2
 ) -> str:
@@ -299,7 +281,21 @@ def search_with_filters(
     try:
         collection = chroma_client.get_or_create_collection(
             name=collection_name)
-        query_embedding = openai_embedding_function([query])
+        
+        # Generate query embedding using configured model
+        model_id = embedding_config.get("model_id", "default")
+        model_type = embedding_config.get("model_type", "sentence_transformers")
+        model_name = embedding_config.get("model_name", "all-MiniLM-L6-v2")
+        
+        # Get or create embedding model
+        embedding_model = get_embedding_model(
+            model_id=model_id,
+            model_type=model_type,
+            model_name=model_name,
+            config=embedding_config.get("config", {})
+        )
+        
+        query_embedding = [embedding_model.embed_text(query)]
 
         results = collection.query(
             query_embeddings=query_embedding,

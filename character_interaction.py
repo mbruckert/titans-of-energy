@@ -48,6 +48,8 @@ recording_start_time = None
 audio_buffer = deque(maxlen=48000)  # 3 seconds at 16kHz
 wakeword_queue = queue.Queue()
 transcription_thread = None
+last_wakeword_detection = 0  # Timestamp of last wakeword detection
+wakeword_cooldown = 3.0  # Cooldown period in seconds
 
 def signal_handler(sig, frame):
     global shutdown_flag
@@ -89,12 +91,8 @@ api_base_url = args.api_endpoint
 character_id = args.character_id
 min_recording_duration = 0.5
 
-# Wakeword patterns - more variations for better matching
-WAKEWORD_PATTERNS = [
-    "hey oppenheimer", "oppenheimer", "hey openheimer", "openheimer",
-    "hey oppen", "oppen", "hey open", "open heimer", "hey op",
-    "oppenheimer", "oppenheimmer", "oppenhiemer", "openhimer"
-]
+# Wakeword patterns - will be populated dynamically based on character
+WAKEWORD_PATTERNS = []
 
 # Initialize audio
 try:
@@ -198,7 +196,7 @@ def transcribe_audio_optimized(audio_path):
 
 def wakeword_detection_worker():
     """Background thread for processing wakeword detection"""
-    global current_state, recording, is_recording, recording_start_time, silence_start
+    global current_state, recording, is_recording, recording_start_time, silence_start, last_wakeword_detection
     
     while not shutdown_flag:
         try:
@@ -232,11 +230,20 @@ def wakeword_detection_worker():
             if transcript:
                 print(f"🎯 Checking: '{transcript}'")
                 
+                # Check cooldown period
+                current_time = time.time()
+                if current_time - last_wakeword_detection < wakeword_cooldown:
+                    print(f"⏰ Wakeword cooldown active ({wakeword_cooldown - (current_time - last_wakeword_detection):.1f}s remaining)")
+                    continue
+                
                 # Check for wakeword
                 wakeword_detected, pattern = check_for_wakeword(transcript)
                 
                 if wakeword_detected:
                     print(f"✅ Wakeword '{pattern}' detected! Now listening for your question...")
+                    
+                    # Update last detection timestamp
+                    last_wakeword_detection = current_time
                     
                     # Play start recording sound
                     play_notification_sound("start")
@@ -246,6 +253,17 @@ def wakeword_detection_worker():
                     is_recording = True
                     recording_start_time = time.time()
                     silence_start = None
+                    
+                    print(f"🎤 Started recording question (threshold: {max(threshold * 2, 0.01):.4f})")
+                    print(f"🔇 Will stop after {silence_duration}s of silence")
+                    
+                    # Clear the wakeword queue to prevent duplicate detections
+                    try:
+                        while not wakeword_queue.empty():
+                            wakeword_queue.get_nowait()
+                            wakeword_queue.task_done()
+                    except queue.Empty:
+                        pass
                 else:
                     print(f"❌ No wakeword in: '{transcript}'")
             
@@ -255,6 +273,61 @@ def wakeword_detection_worker():
             continue
         except Exception as e:
             print(f"⚠️ Wakeword detection error: {e}")
+
+def fetch_character_wakeword(character_id):
+    """Fetch character's wakeword from API"""
+    try:
+        response = requests.get(f"{api_base_url}/get-character-wakeword/{character_id}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'success':
+                return data.get('wakeword', 'hey character')
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching wakeword: {e}")
+        return None
+
+def setup_wakeword_patterns(base_wakeword):
+    """Setup wakeword patterns based on character's wakeword"""
+    global WAKEWORD_PATTERNS
+    
+    if not base_wakeword:
+        base_wakeword = "hey character"
+    
+    base_lower = base_wakeword.lower()
+    
+    # Generate variations for better matching
+    patterns = [base_lower]
+    
+    # Add variations with different greetings
+    if base_lower.startswith("hey "):
+        name_part = base_lower[4:]  # Remove "hey "
+        patterns.extend([
+            f"hi {name_part}",
+            f"hello {name_part}",
+            name_part,  # Just the name
+            f"hey {name_part}",  # Original
+        ])
+    else:
+        # If it doesn't start with "hey", add greeting variations
+        patterns.extend([
+            f"hey {base_lower}",
+            f"hi {base_lower}",
+            f"hello {base_lower}",
+        ])
+    
+    # Add common transcription errors/variations
+    for pattern in patterns.copy():
+        if "oppenheimer" in pattern:
+            patterns.extend([
+                pattern.replace("oppenheimer", "openheimer"),
+                pattern.replace("oppenheimer", "oppenheimmer"),
+                pattern.replace("oppenheimer", "oppenhiemer"),
+                pattern.replace("oppenheimer", "openhimer"),
+            ])
+    
+    WAKEWORD_PATTERNS = list(set(patterns))  # Remove duplicates
+    print(f"🎯 Wakeword patterns: {WAKEWORD_PATTERNS}")
 
 def call_character_api(question):
     """Call character API"""
@@ -290,32 +363,32 @@ def base64_to_audio_data(base64_string):
         return None
 
 def play_thinking_audio():
-    """Play a random thinking audio clip"""
-    thinking_files = ["./thinking1.wav", "./thinking2.wav", "./thinking3.wav"]
-    
-    # Filter to only existing files
-    available_files = [f for f in thinking_files if os.path.exists(f)]
-    
-    if not available_files:
-        print("⚠️ No thinking audio files found")
-        return False
-    
-    # Pick a random file
-    selected_file = random.choice(available_files)
-    
+    """Play a random thinking audio clip from character's API"""
     try:
-        print(f"🤔 Playing thinking audio: {selected_file}")
-        pygame.mixer.music.load(selected_file)
-        pygame.mixer.music.play()
+        print("🤔 Fetching thinking audio from API...")
+        response = requests.get(f"{api_base_url}/get-character-thinking-audio/{character_id}", timeout=10)
         
-        # Wait for the audio to finish playing
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.1)
+        if response.status_code != 200:
+            print("⚠️ No thinking audio available for this character")
+            return False
+            
+        data = response.json()
         
-        print("✅ Thinking audio finished")
-        return True
+        if data.get('status') != 'success' or not data.get('audio_base64'):
+            print("⚠️ No thinking audio data received")
+            return False
+        
+        # Convert base64 to audio data and play
+        audio_data = base64_to_audio_data(data['audio_base64'])
+        if audio_data:
+            print(f"🤔 Playing thinking audio (phrase: {data.get('phrase_id', 'unknown')})")
+            return play_audio_response(audio_data)
+        else:
+            print("❌ Failed to decode thinking audio")
+            return False
+            
     except Exception as e:
-        print(f"❌ Error playing thinking audio: {e}")
+        print(f"❌ Error fetching/playing thinking audio: {e}")
         return False
 
 def play_notification_sound(sound_type="start"):
@@ -395,23 +468,35 @@ def callback(indata, frames, time_info, status):
                             audio_buffer.popleft()
 
         elif current_state == RECORDING_QUESTION:
+            # Clear audio buffer when first entering recording state to avoid wake word contamination
+            if len(audio_buffer) > 0:
+                audio_buffer.clear()
+            
             # Record the question after wakeword detected
             if is_recording:
                 recording.append(audio_data.copy())
 
-                if volume_rms > threshold * 0.3:
+                # Use a more reasonable silence threshold for question recording
+                # Since threshold is for wakeword detection (0.02), use a higher threshold for speech
+                speech_threshold = max(threshold * 2, 0.01)  # At least 0.01, or 2x wakeword threshold
+                
+                if volume_rms > speech_threshold:
                     silence_start = None
+                    print(f"🎤 Recording... (volume: {volume_rms:.4f})")
                 else:
                     if silence_start is None:
                         silence_start = time.time()
+                        print(f"🔇 Silence detected, waiting {silence_duration}s to stop...")
                     elif time.time() - silence_start > silence_duration:
                         recording_duration = time.time() - recording_start_time
                         if recording_duration >= min_recording_duration:
+                            print(f"✅ Recording stopped after {recording_duration:.1f}s")
                             is_recording = False
                             current_state = PROCESSING_QUESTION
                             # Play stop recording sound in a separate thread to avoid blocking
                             threading.Thread(target=lambda: play_notification_sound("stop"), daemon=True).start()
                         else:
+                            print(f"⚠️ Recording too short ({recording_duration:.1f}s), continuing...")
                             silence_start = None
 
         elif current_state == PROCESSING_QUESTION:
@@ -421,16 +506,26 @@ def callback(indata, frames, time_info, status):
     except Exception as e:
         print(f"❌ Callback error: {e}")
 
+# Fetch character's wakeword and setup patterns
+print(f"🔄 Fetching wakeword for character {character_id}...")
+character_wakeword = fetch_character_wakeword(character_id)
+if character_wakeword:
+    print(f"✅ Character wakeword: '{character_wakeword}'")
+    setup_wakeword_patterns(character_wakeword)
+else:
+    print("⚠️ Failed to fetch character wakeword, using default patterns")
+    setup_wakeword_patterns("hey character")
+
 # Start wakeword detection thread
 transcription_thread = threading.Thread(target=wakeword_detection_worker, daemon=True)
 transcription_thread.start()
 
 # Main execution
-print("🎯 Starting voice assistant with improved 'hey oppenheimer' detection")
+print("🎯 Starting voice assistant with dynamic wakeword detection")
 print(f"🔊 Volume threshold: {threshold}")
 print(f"🎯 Wakeword threshold: {wakeword_threshold}")
 print(f"🤖 Using {args.model} model ({args.whisper_size if args.model == 'whisper' else 'default'})")
-print("🎧 Say 'hey oppenheimer' to activate, then ask your question")
+print(f"🎧 Say '{character_wakeword or 'hey character'}' to activate, then ask your question")
 print("Press Ctrl+C to quit.")
 
 start_session = time.time()
@@ -492,7 +587,9 @@ try:
                 # Reset to listening
                 recording = []
                 current_state = LISTENING
-                print("🎧 Listening for 'hey oppenheimer' again...")
+                # Clear audio buffer to start fresh
+                audio_buffer.clear()
+                print(f"🎧 Listening for '{character_wakeword or 'hey character'}' again...")
 
             # Session timeout
             if time.time() - start_session > max_record_seconds:

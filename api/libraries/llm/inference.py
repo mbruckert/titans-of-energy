@@ -64,8 +64,12 @@ def _get_device_optimization():
 
 
 # Initialize clients for style retrieval
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 chroma_client = PersistentClient(path=CHROMA_DB_PATH)
+
+# Import unified embedding models
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+from embedding_models import get_embedding_model, EmbeddingModelType, embedding_manager
 
 
 def _authenticate_huggingface():
@@ -102,13 +106,14 @@ class ModelLoadError(Exception):
     pass
 
 
-def get_style_data(query: str, character_name: str, num_examples: int = 3) -> List[str]:
+def get_style_data(query: str, character_name: str, embedding_config: Dict[str, Any], num_examples: int = 3) -> List[str]:
     """
     Get style examples from the vector database most similar to the query.
 
     Args:
         query: The query question to find similar examples for
         character_name: Name of the character to get style examples for
+        embedding_config: Configuration for embedding model
         num_examples: Number of examples to retrieve
 
     Returns:
@@ -117,9 +122,6 @@ def get_style_data(query: str, character_name: str, num_examples: int = 3) -> Li
     Raises:
         Exception: If style retrieval fails
     """
-    if not openai_client:
-        raise Exception("OpenAI API key required for style data retrieval")
-
     try:
         # Create collection name
         collection_name = f"{character_name.lower().replace(' ', '')}-style"
@@ -127,16 +129,24 @@ def get_style_data(query: str, character_name: str, num_examples: int = 3) -> Li
         # Get collection
         collection = chroma_client.get_collection(collection_name)
 
-        # Generate query embedding
-        response = openai_client.embeddings.create(
-            input=[query],
-            model=EMBEDDING_MODEL
+        # Generate query embedding using configured model
+        model_id = embedding_config.get("model_id", "default")
+        model_type = embedding_config.get("model_type", "sentence_transformers")
+        model_name = embedding_config.get("model_name", "all-MiniLM-L6-v2")
+        
+        # Get or create embedding model
+        embedding_model = get_embedding_model(
+            model_id=model_id,
+            model_type=model_type,
+            model_name=model_name,
+            config=embedding_config.get("config", {})
         )
-        query_embedding = response.data[0].embedding
+        
+        query_embedding = [embedding_model.embed_text(query)]
 
         # Query the collection
         results = collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=query_embedding,
             n_results=num_examples,
             include=['documents', 'metadatas']
         )
@@ -200,12 +210,18 @@ def generate_styled_text(
         prompt_parts.append("Additional context:")
         prompt_parts.append(knowledge)
         prompt_parts.append("")  # Empty line
+        print(f"🔍 Knowledge context added to prompt ({len(knowledge)} characters)")
+        print(f"🔍 Knowledge preview: {knowledge[:200]}...")
+    else:
+        print(f"🔍 No knowledge context provided (empty or whitespace)")
 
     # Add the query
     prompt_parts.append(f"User: {query}")
     prompt_parts.append("Assistant:")
 
     prompt = "\n".join(prompt_parts)
+    print(f"🔍 Final prompt length: {len(prompt)} characters")
+    print(f"🔍 Final prompt preview: {prompt[:500]}...")
 
     # Try to use cached model first if character_name is provided
     if character_name:
@@ -216,9 +232,17 @@ def generate_styled_text(
             return cached_model.generate(prompt, **model_config)
 
     # Determine model type and generate
-    if 'api_key' in model_config:
+    # First check if it's a local model based on file path/extension
+    if model.endswith('.gguf') or os.path.exists(model) or os.path.exists(os.path.join(MODELS_DIR, model)):
+        return _generate_with_local_model(prompt, model, model_config)
+    elif 'api_key' in model_config:
         return _generate_with_api(prompt, model, model_config)
+    elif '/' in model and not model.startswith('./') and not model.startswith('/'):
+        # This looks like a HuggingFace repository name (e.g., "meta-llama/Llama-3.2-1B")
+        print(f"Detected HuggingFace repository name: {model}")
+        return _generate_with_huggingface(prompt, model, model_config)
     else:
+        # Default to local model if no clear indication
         return _generate_with_local_model(prompt, model, model_config)
 
 
@@ -472,11 +496,26 @@ def _generate_with_huggingface(prompt: str, model_path: str, model_config: Dict[
         )
 
     try:
-        # Get device optimization info
-        device_type, device_info = _get_device_optimization()
-
         # Authenticate with Hugging Face before loading
         _authenticate_huggingface()
+
+        # Add debugging for model path
+        print(f"🔍 Loading HuggingFace model from: {model_path}")
+        print(f"🔍 Model path exists: {os.path.exists(model_path)}")
+        print(f"🔍 Is directory: {os.path.isdir(model_path)}")
+        if os.path.isdir(model_path):
+            files = os.listdir(model_path)
+            print(f"🔍 Files in directory: {files}")
+            # Check for essential files
+            essential_files = ['config.json', 'tokenizer.json', 'tokenizer_config.json']
+            for file in essential_files:
+                if file in files:
+                    print(f"✓ Found {file}")
+                else:
+                    print(f"❌ Missing {file}")
+
+        # Get device optimization info
+        device_type, device_info = _get_device_optimization()
 
         # Determine device and dtype based on optimization
         device = "auto"
@@ -533,38 +572,120 @@ def _generate_with_huggingface(prompt: str, model_path: str, model_config: Dict[
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # Tokenize input
-        inputs = tokenizer(prompt, return_tensors="pt", padding=True)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-        # Generation parameters with device optimization
-        max_new_tokens = model_config.get("max_tokens", 200)
-        temperature = model_config.get("temperature", 0.7)
-        top_p = model_config.get("top_p", 0.9)
-        do_sample = temperature > 0
-
-        generation_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature if do_sample else None,
-            "top_p": top_p if do_sample else None,
-            "do_sample": do_sample,
-            "pad_token_id": tokenizer.pad_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-            "repetition_penalty": model_config.get("repetition_penalty", 1.1)
-        }
-
-        # Add device-specific generation optimizations
-        if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU:
-            if device_info.get("enable_memory_efficient_attention", True):
-                generation_kwargs["use_cache"] = True
-
-        # Generate
-        with torch.no_grad():
-            if DEVICE_OPTIMIZATION_AVAILABLE and device_type == DeviceType.NVIDIA_GPU and device_info.get("mixed_precision", True):
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    outputs = model.generate(**inputs, **generation_kwargs)
+        # Extract system prompt and user message for proper chat formatting
+        system_prompt = ""
+        user_message = ""
+        
+        if 'system_prompt' in model_config and model_config['system_prompt']:
+            system_prompt = model_config['system_prompt']
+            print(f"🔍 Found system prompt in config: {system_prompt}")
+            
+            # Remove system prompt from the beginning of the prompt to get the rest
+            if prompt.startswith(system_prompt):
+                remaining_prompt = prompt[len(system_prompt):].strip()
+                print(f"🔍 Remaining prompt after removing system: {remaining_prompt[:200]}...")
             else:
-                outputs = model.generate(**inputs, **generation_kwargs)
+                remaining_prompt = prompt
+                print(f"🔍 System prompt not at beginning, using full prompt: {prompt[:200]}...")
+        else:
+            remaining_prompt = prompt
+            print(f"🔍 No system prompt found, using full prompt: {prompt[:200]}...")
+        
+        # Extract the actual user question from the end of the prompt
+        # The format is: [style examples] [knowledge context] User: <question> Assistant:
+        lines = remaining_prompt.split('\n')
+        user_line = None
+        for i, line in enumerate(lines):
+            if line.startswith('User: '):
+                user_line = line
+                user_message = line[6:]  # Remove "User: " prefix
+                break
+        
+        if not user_message:
+            # Fallback: use the remaining prompt as user message
+            user_message = remaining_prompt
+            print(f"🔍 Could not find 'User: ' line, using remaining prompt as user message")
+        
+        print(f"🔍 Extracted user message: {user_message}")
+        
+        # Build the complete user message including context
+        # We need to include style examples and knowledge context in the user message
+        # since the chat template only supports system + user format
+        user_message_parts = []
+        
+        # Add style examples and knowledge context to user message
+        context_parts = []
+        lines = remaining_prompt.split('\n')
+        
+        # Find everything before "User: " line
+        for line in lines:
+            if line.startswith('User: '):
+                break
+            if line.strip() and not line.startswith('Assistant:'):
+                context_parts.append(line)
+        
+        # Combine context with the actual user question
+        if context_parts:
+            full_user_message = '\n'.join(context_parts) + '\n\n' + user_message
+        else:
+            full_user_message = user_message
+        
+        print(f"🔍 Final system prompt: {system_prompt}")
+        print(f"🔍 Final user message: {full_user_message[:200]}...")
+        
+        # Use the model's chat template if available
+        if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+            messages = []
+            
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            
+            messages.append({"role": "user", "content": full_user_message})
+            
+            print(f"🔍 Messages for chat template: {[{'role': m['role'], 'content': m['content'][:100] + '...' if len(m['content']) > 100 else m['content']} for m in messages]}")
+            
+            try:
+                # Apply the chat template
+                formatted_prompt = tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+                print(f"🔧 Using chat template for model {model_path}")
+                print(f"🔧 Formatted prompt: {formatted_prompt[:300]}...")
+            except Exception as e:
+                print(f"Warning: Could not apply chat template: {e}")
+                formatted_prompt = prompt
+        else:
+            print(f"🔧 No chat template available, using custom Llama format")
+            # Create a Llama-style chat format manually
+            if system_prompt:
+                formatted_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{full_user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            else:
+                formatted_prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{full_user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            
+            print(f"🔧 Custom formatted prompt: {formatted_prompt[:300]}...")
+
+        # Tokenize input
+        inputs = tokenizer(formatted_prompt, return_tensors="pt").to(device)
+        
+        # Handle pad_token_id for Llama models (often None)
+        pad_token_id = tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = tokenizer.eos_token_id
+        
+        # Generate response
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=100,
+                temperature=0.7,
+                do_sample=True,
+                top_p=0.9,
+                pad_token_id=pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.1
+            )
 
         # Decode response
         generated_text = tokenizer.decode(
@@ -860,41 +981,42 @@ class HuggingFaceModel(BaseModel):
             inputs = self.tokenizer(prompt, return_tensors="pt", padding=True)
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
-            # Generation parameters
+            # Generation parameters with device optimization
             max_new_tokens = kwargs.get("max_tokens", 200)
             temperature = kwargs.get("temperature", 0.7)
             top_p = kwargs.get("top_p", 0.9)
             do_sample = temperature > 0
 
+            generation_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature if do_sample else None,
+                "top_p": top_p if do_sample else None,
+                "do_sample": do_sample,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "repetition_penalty": kwargs.get("repetition_penalty", 1.1)
+            }
+
+            # Add device-specific generation optimizations
+            if DEVICE_OPTIMIZATION_AVAILABLE and self.model.device.type == "cuda":
+                if device_info.get("enable_memory_efficient_attention", True):
+                    generation_kwargs["use_cache"] = True
+
             # Generate
             with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature if do_sample else None,
-                    top_p=top_p if do_sample else None,
-                    do_sample=do_sample,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    repetition_penalty=kwargs.get("repetition_penalty", 1.1)
-                )
+                if DEVICE_OPTIMIZATION_AVAILABLE and self.model.device.type == "cuda" and device_info.get("mixed_precision", True):
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        outputs = self.model.generate(**inputs, **generation_kwargs)
+                else:
+                    outputs = self.model.generate(**inputs, **generation_kwargs)
 
-            # Decode only the new tokens
-            new_tokens = outputs[0][inputs['input_ids'].shape[1]:]
+            # Decode response
             generated_text = self.tokenizer.decode(
-                new_tokens, skip_special_tokens=True)
+                outputs[0][len(inputs['input_ids'][0]):],
+                skip_special_tokens=True
+            ).strip()
 
-            # Clean up stop tokens
-            stop_tokens = kwargs.get("stop_tokens", [
-                "\nUser:", "\nAssistant:", "<STOP>", "\nSystem:",
-                "User:", "Assistant:", "System:"
-            ])
-
-            for token in stop_tokens:
-                if token in generated_text:
-                    generated_text = generated_text.split(token)[0]
-
-            return generated_text.strip()
+            return generated_text
 
         except Exception as e:
             raise Exception(f"Hugging Face text generation failed: {e}")

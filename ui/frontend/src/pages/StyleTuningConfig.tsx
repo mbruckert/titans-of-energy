@@ -1,8 +1,18 @@
 import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
+import VectorModelSelector from '../components/VectorModelSelector';
 import { X } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+
+interface VectorConfig {
+  model_type: 'openai' | 'sentence_transformers';
+  model_name: string;
+  config: {
+    api_key?: string;
+    device?: string;
+  };
+}
 
 // Global file storage for the character creation flow
 declare global {
@@ -21,16 +31,117 @@ const StyleTuningConfig = () => {
   const [files, setFiles] = useState<File[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [embeddingConfig, setEmbeddingConfig] = useState<VectorConfig>({
+    model_type: 'sentence_transformers',
+    model_name: 'all-MiniLM-L6-v2',
+    config: { device: 'auto' }
+  });
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const droppedFiles = Array.from(e.dataTransfer.files);
-    setFiles(prevFiles => [...prevFiles, ...droppedFiles]);
+    
+    // Validate JSON files
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+    
+    droppedFiles.forEach(file => {
+      // Check file format
+      if (!file.name.toLowerCase().endsWith('.json')) {
+        invalidFiles.push(`${file.name}: Only JSON files are allowed`);
+        return;
+      }
+      
+      // Validate JSON content
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = e.target?.result as string;
+          const parsed = JSON.parse(content);
+          
+          // Check if it's an array of objects with question and response
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const isValid = parsed.every(item => 
+              typeof item === 'object' && 
+              item !== null && 
+              'question' in item && 
+              'response' in item &&
+              typeof item.question === 'string' &&
+              typeof item.response === 'string'
+            );
+            
+            if (isValid) {
+              validFiles.push(file);
+              setFiles(prevFiles => [...prevFiles, file]);
+            } else {
+              invalidFiles.push(`${file.name}: Invalid format. Must be an array of objects with "question" and "response" fields`);
+              setError(invalidFiles.join(', '));
+            }
+          } else {
+            invalidFiles.push(`${file.name}: Must be an array of question-answer pairs`);
+            setError(invalidFiles.join(', '));
+          }
+        } catch (err) {
+          invalidFiles.push(`${file.name}: Invalid JSON format`);
+          setError(invalidFiles.join(', '));
+        }
+      };
+      
+      reader.readAsText(file);
+    });
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || []);
-    setFiles(prevFiles => [...prevFiles, ...selectedFiles]);
+    
+    // Validate JSON files
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+    
+    selectedFiles.forEach(file => {
+      // Check file format
+      if (!file.name.toLowerCase().endsWith('.json')) {
+        invalidFiles.push(`${file.name}: Only JSON files are allowed`);
+        return;
+      }
+      
+      // Validate JSON content
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = e.target?.result as string;
+          const parsed = JSON.parse(content);
+          
+          // Check if it's an array of objects with question and response
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const isValid = parsed.every(item => 
+              typeof item === 'object' && 
+              item !== null && 
+              'question' in item && 
+              'response' in item &&
+              typeof item.question === 'string' &&
+              typeof item.response === 'string'
+            );
+            
+            if (isValid) {
+              validFiles.push(file);
+              setFiles(prevFiles => [...prevFiles, file]);
+            } else {
+              invalidFiles.push(`${file.name}: Invalid format. Must be an array of objects with "question" and "response" fields`);
+              setError(invalidFiles.join(', '));
+            }
+          } else {
+            invalidFiles.push(`${file.name}: Must be an array of question-answer pairs`);
+            setError(invalidFiles.join(', '));
+          }
+        } catch (err) {
+          invalidFiles.push(`${file.name}: Invalid JSON format`);
+          setError(invalidFiles.join(', '));
+        }
+      };
+      
+      reader.readAsText(file);
+    });
   };
 
   const removeFile = (index: number) => {
@@ -58,6 +169,11 @@ const StyleTuningConfig = () => {
       // Add basic character info
       formData.append('name', characterData.name);
       
+      // Add wakeword if available
+      if (characterData.wakeword) {
+        formData.append('wakeword', characterData.wakeword);
+      }
+      
       // Add LLM configuration
       if (characterData.llm_model) {
         formData.append('llm_model', characterData.llm_model);
@@ -67,6 +183,16 @@ const StyleTuningConfig = () => {
       // Add voice cloning settings (if configured)
       if (characterData.voice_cloning_settings) {
         formData.append('voice_cloning_settings', JSON.stringify(characterData.voice_cloning_settings));
+      }
+
+      // Add embedding configurations
+      if (characterData.knowledgeBaseEmbeddingConfig) {
+        formData.append('knowledge_base_embedding_config', JSON.stringify(characterData.knowledgeBaseEmbeddingConfig));
+      }
+      
+      // Add style tuning embedding config
+      if (files.length > 0) {
+        formData.append('style_tuning_embedding_config', JSON.stringify(embeddingConfig));
       }
 
       // Add character image if available
@@ -91,20 +217,38 @@ const StyleTuningConfig = () => {
         formData.append('style_tuning_file', files[0]);
       }
 
-      // Call the API
+      // Call the API with timeout (5 minutes for character creation with thinking audio)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes
+
+      console.log('🚀 Starting character creation request...');
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.CREATE_CHARACTER}`, {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
+      console.log('📡 Received response:', response.status, response.statusText);
+
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to create character');
+        let errorMessage = 'Failed to create character';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (parseError) {
+          console.error('Failed to parse error response:', parseError);
+          errorMessage = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
       }
 
       const result = await response.json();
+      console.log('✅ Character creation result:', result);
 
       if (result.status === 'success') {
+        console.log('🎉 Character created successfully!');
         // Clear session storage and global file storage
         sessionStorage.removeItem('newCharacterData');
         window.characterCreationFiles = {};
@@ -116,7 +260,16 @@ const StyleTuningConfig = () => {
       }
 
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      console.error('❌ Character creation failed:', err);
+      if (err instanceof Error) {
+        if (err.name === 'AbortError') {
+          setError('Character creation timed out. This may happen with complex voice cloning models. Please try again or use a simpler configuration.');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('An error occurred during character creation');
+      }
     } finally {
       setIsCreating(false);
     }
@@ -151,13 +304,27 @@ const StyleTuningConfig = () => {
     createCharacter();
   };
 
-
-
   return (
     <div className="container mx-auto p-4 max-w-2xl">
       <div className="text-center mb-8">
-        <h1 className="text-2xl font-bold mb-2">Style Tuning</h1>
-        <p className="text-gray-600">Configure your character's personality and response style</p>
+        <h1 className="text-2xl font-bold mb-2">Style Tuning Configuration</h1>
+        <p className="text-gray-600">Upload conversation examples to fine-tune your character's response style</p>
+        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <p className="text-sm text-blue-800">
+            💡 <strong>Tip:</strong> Upload JSON files containing question-answer pairs that demonstrate how your character should respond. Format: [{'"question": "...", "response": "..."'}]
+          </p>
+        </div>
+      </div>
+
+      {/* Vector Model Configuration */}
+      <div className="mb-6">
+        <VectorModelSelector
+          label="Style Tuning Embedding Model"
+          description="Choose the embedding model for processing your style tuning data. This model will be used to create vector representations of your conversation examples."
+          value={embeddingConfig}
+          onChange={setEmbeddingConfig}
+          className="bg-gray-50"
+        />
       </div>
 
       {error && (
@@ -195,14 +362,14 @@ const StyleTuningConfig = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your style configuration files or drag and drop</p>
-        <p className="text-sm text-gray-500 mb-4">Upload text files with example conversations or personality descriptions</p>
-        <p className="text-xs text-gray-500 mb-4">Accepted formats: TXT, JSON, YAML, YML</p>
+        <p className="text-sm text-gray-500 mb-4">Upload JSON files with question-answer pairs to define your character's response style</p>
+        <p className="text-xs text-gray-500 mb-4">Accepted formats: JSON only</p>
         <input
           type="file"
           id="file-upload"
           className="hidden"
           onChange={handleFileSelect}
-          accept=".txt,.json,.yaml,.yml"
+          accept=".json"
           multiple
         />
         <button

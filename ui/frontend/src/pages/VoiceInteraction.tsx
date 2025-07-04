@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Mic, MicOff, Volume2, VolumeX, ArrowLeft, Zap, Loader, Settings, X } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, ArrowLeft, Zap, Loader, Settings, X, BookOpen, ChevronDown, ChevronUp, Search } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
 
 // Speech Recognition types
@@ -48,15 +48,18 @@ interface SpeechRecognition extends EventTarget {
   onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null;
 }
 
-declare global {
-  interface Window {
-    SpeechRecognition: {
-      new(): SpeechRecognition;
-    };
-    webkitSpeechRecognition: {
-      new(): SpeechRecognition;
-    };
-  }
+// Type definitions for speech recognition (avoiding global interface conflicts)
+type SpeechRecognitionConstructor = new() => SpeechRecognition;
+
+interface KnowledgeReference {
+  id: number;
+  content: string;
+  source: string;
+  chunk_id?: number;
+  keywords: string[];
+  entities: string[];
+  type: string;
+  relevance_score?: number;
 }
 
 interface VoiceInteractionProps {}
@@ -69,6 +72,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const characterId = location.state?.characterId;
   const characterName = location.state?.characterName || "Character";
   const characterImage = location.state?.characterImage;
+  const [characterWakeword, setCharacterWakeword] = useState<string>(`hey ${characterName.toLowerCase()}`);
   
   // Recording state
   const [isListening, setIsListening] = useState(false);
@@ -86,8 +90,12 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const [audioLevel, setAudioLevel] = useState(0);
   const [transcript, setTranscript] = useState('');
   const [lastResponse, setLastResponse] = useState('');
+  const [lastKnowledgeReferences, setLastKnowledgeReferences] = useState<KnowledgeReference[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [speakingWaveform, setSpeakingWaveform] = useState<number[]>(Array(12).fill(0));
+  
+  // Knowledge references state
+  const [expandedReferences, setExpandedReferences] = useState<Set<number>>(new Set());
   
   // Settings
   const [volumeThreshold, setVolumeThreshold] = useState(0.01); // Lower threshold for better sensitivity
@@ -159,6 +167,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     initializeAudioMonitoring();
     
     return () => {
+      console.log('🧹 VoiceInteraction component unmounting - cleaning up...');
       cleanup();
     };
   }, [characterId, navigate]);
@@ -167,6 +176,20 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     try {
       setIsLoadingCharacter(true);
       setCharacterLoadingStatus("Loading character models...");
+      
+      // First, fetch the character's wakeword
+      try {
+        const wakewordResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHARACTER_WAKEWORD}/${characterId}`);
+        if (wakewordResponse.ok) {
+          const wakewordData = await wakewordResponse.json();
+          if (wakewordData.status === 'success' && wakewordData.wakeword) {
+            setCharacterWakeword(wakewordData.wakeword);
+            console.log('Character wakeword loaded:', wakewordData.wakeword);
+          }
+        }
+      } catch (wakewordErr) {
+        console.warn('Failed to load character wakeword:', wakewordErr);
+      }
       
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOAD_CHARACTER}`, {
         method: 'POST',
@@ -210,9 +233,43 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     }
   }, [isListening, isRecording, isTranscribing, isGeneratingResponse, isProcessing]);
 
+  // Cleanup effect specifically for component unmounting
+  useEffect(() => {
+    return () => {
+      console.log('🧹 Wake word detection cleanup on unmount');
+      stopWakeWordDetection();
+    };
+  }, []);
+
+  // Handle page visibility changes to stop wake word detection when page is hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        console.log('🙈 Page hidden - stopping wake word detection');
+        stopWakeWordDetection();
+      } else if (isListening && !isWakeWordListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+        console.log('👁️ Page visible - restarting wake word detection');
+        setTimeout(() => {
+          isProcessingWakeWordRef.current = false; // Reset processing flag
+          wakeWordRestartAttemptsRef.current = 0; // Reset restart attempts
+          if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+            startWakeWordDetection();
+          }
+        }, 1000);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isListening, isWakeWordListening, isRecording, isTranscribing, isGeneratingResponse, isProcessing]);
+
   const startWakeWordDetection = () => {
     // Check if speech recognition is supported
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    const windowWithSpeech = window as any;
+    if (!windowWithSpeech.webkitSpeechRecognition && !windowWithSpeech.SpeechRecognition) {
       console.warn('❌ Speech recognition not supported in this browser');
       return;
     }
@@ -244,10 +301,10 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       return;
     }
 
-    try {
-      console.log('🎯 Creating new speech recognition instance');
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
+          try {
+        console.log('🎯 Creating new speech recognition instance');
+        const SpeechRecognition = windowWithSpeech.SpeechRecognition || windowWithSpeech.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
       
       // Configure recognition
       recognition.continuous = true;
@@ -296,11 +353,13 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
             }
             
             // Check for wake word variations in both interim and final results
+            const baseWakeword = characterWakeword.toLowerCase();
             const wakeWords = [
-              'hey oppenheimer',
-              'hi oppenheimer', 
-              'hello oppenheimer',
-              'oppenheimer'
+              baseWakeword,
+              baseWakeword.replace('hey ', 'hi '),
+              baseWakeword.replace('hey ', 'hello '),
+              // Extract just the name part if it starts with "hey"
+              ...(baseWakeword.startsWith('hey ') ? [baseWakeword.substring(4)] : [])
             ];
             
             const containsWakeWord = wakeWords.some(wakeWord => 
@@ -336,7 +395,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
         }
       };
 
-      recognition.onerror = (event) => {
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.error('❌ Wake word detection error:', event.error, event.message);
         
         // Clean up state
@@ -346,7 +405,11 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
         // Handle different error types
         if (event.error === 'aborted') {
           console.log('ℹ️ Recognition aborted (normal during stop)');
-          return;
+          // Don't restart if we're intentionally stopping
+          if (isProcessingWakeWordRef.current) {
+            console.log('ℹ️ Aborted during intentional stop - not restarting');
+            return;
+          }
         }
         
         if (event.error === 'not-allowed') {
@@ -359,9 +422,11 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           console.log('ℹ️ No speech detected, will restart');
         }
         
-        // Schedule restart for recoverable errors
-        if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+        // Schedule restart for recoverable errors, but not if we're intentionally stopping
+        if (isListening && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing && !isProcessingWakeWordRef.current) {
           scheduleWakeWordRestart('error');
+        } else {
+          console.log('ℹ️ Not restarting due to error - conditions not met or intentionally stopping');
         }
       };
 
@@ -383,6 +448,13 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
             isProcessingWakeWord: isProcessingWakeWordRef.current,
             isProcessing
           });
+          // If we're intentionally stopping, reset the processing flag after a delay
+          if (isProcessingWakeWordRef.current) {
+            setTimeout(() => {
+              isProcessingWakeWordRef.current = false;
+              console.log('🔄 Reset processing flag after intentional stop');
+            }, 1000);
+          }
         }
       };
 
@@ -403,6 +475,12 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   };
 
   const scheduleWakeWordRestart = (reason: string) => {
+    // Don't schedule restart if we're intentionally stopping
+    if (isProcessingWakeWordRef.current) {
+      console.log('⚠️ Not scheduling restart - intentionally stopping');
+      return;
+    }
+    
     // Clear any existing restart timeout
     if (restartTimeoutRef.current) {
       clearTimeout(restartTimeoutRef.current);
@@ -424,10 +502,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       restartTimeoutRef.current = null;
       
       // Double-check conditions before restart
-      if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+      if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing && !isProcessingWakeWordRef.current) {
         console.log('🚀 Restarting wake word detection');
-        // Reset processing flag before restart
-        isProcessingWakeWordRef.current = false;
         startWakeWordDetection();
       } else {
         console.log('⚠️ Skipping restart - conditions changed:', {
@@ -436,7 +512,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           isRecording,
           isTranscribing,
           isGeneratingResponse,
-          isProcessing
+          isProcessing,
+          isProcessingWakeWord: isProcessingWakeWordRef.current
         });
       }
     }, delay);
@@ -444,6 +521,9 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
 
   const stopWakeWordDetection = () => {
     console.log('🛑 Stopping wake word detection');
+    
+    // Set flag to prevent restart attempts
+    isProcessingWakeWordRef.current = true;
     
     // Clear all timeouts
     if (wakeWordTimeoutRef.current) {
@@ -458,6 +538,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     // Stop recognition
     if (speechRecognitionRef.current) {
       try {
+        console.log('🛑 Stopping speech recognition instance...');
+        // Only call stop(), not abort() to avoid triggering error handlers
         speechRecognitionRef.current.stop();
       } catch (error) {
         console.warn('⚠️ Error stopping speech recognition:', error);
@@ -467,8 +549,9 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     
     // Reset state
     setIsWakeWordListening(false);
-    isProcessingWakeWordRef.current = false;
     wakeWordRestartAttemptsRef.current = 0;
+    
+    console.log('🛑 Wake word detection stopped and cleaned up');
   };
 
   // Reset wake word processing flag when recording starts
@@ -498,43 +581,93 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   }, [isPlayingResponse, isRecording, isTranscribing, isGeneratingResponse, isProcessing, isListening]);
 
   const cleanup = () => {
+    console.log('🧹 Starting cleanup process...');
+    
+    // Stop wake word detection first
+    stopWakeWordDetection();
+    
+    // Stop all audio streams
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      console.log('🧹 Stopping audio stream tracks...');
+      streamRef.current.getTracks().forEach(track => {
+        track.stop();
+        console.log('🧹 Stopped audio track:', track.id);
+      });
+      streamRef.current = null;
     }
+    
+    // Close audio context
     if (audioContextRef.current) {
+      console.log('🧹 Closing audio context...');
       audioContextRef.current.close();
+      audioContextRef.current = null;
     }
+    
+    // Cancel animation frames
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
     if (waveformAnimationRef.current) {
       cancelAnimationFrame(waveformAnimationRef.current);
+      waveformAnimationRef.current = null;
     }
+    
+    // Clear all timers
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
     if (maxRecordingTimerRef.current) {
       clearTimeout(maxRecordingTimerRef.current);
+      maxRecordingTimerRef.current = null;
     }
-    if (wakeWordTimeoutRef.current) {
-      clearTimeout(wakeWordTimeoutRef.current);
+    
+    // Stop media recorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      console.log('🧹 Stopping media recorder...');
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
     }
-    if (restartTimeoutRef.current) {
-      clearTimeout(restartTimeoutRef.current);
-    }
-    if (speechRecognitionRef.current) {
-      speechRecognitionRef.current.stop();
-    }
+    
+    // Stop current audio playback
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current.currentTime = 0;
+      currentAudioRef.current = null;
     }
+    
+    // Reset all state flags
+    setIsListening(false);
+    setIsRecording(false);
+    setIsProcessing(false);
+    setIsTranscribing(false);
+    setIsGeneratingResponse(false);
+    setIsPlayingResponse(false);
+    setIsWakeWordListening(false);
+    
     // Reset processing flags
     isProcessingWakeWordRef.current = false;
+    wakeWordRestartAttemptsRef.current = 0;
+    
+    console.log('🧹 Cleanup completed');
   };
 
   const initializeAudioMonitoring = async () => {
     try {
+      console.log('🎤 Initializing audio monitoring...');
+      
+      // Reset all state flags before initialization
+      setIsListening(false);
+      setIsRecording(false);
+      setIsProcessing(false);
+      setIsTranscribing(false);
+      setIsGeneratingResponse(false);
+      setIsPlayingResponse(false);
+      setIsWakeWordListening(false);
+      isProcessingWakeWordRef.current = false;
+      wakeWordRestartAttemptsRef.current = 0;
+      
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
@@ -545,6 +678,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       });
       
       streamRef.current = stream;
+      console.log('🎤 Audio stream obtained');
       
       // Set up audio context for volume monitoring
       const audioContext = new AudioContext();
@@ -575,6 +709,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       
       setIsListening(true);
       startVolumeMonitoring();
+      
+      console.log('🎤 Audio monitoring initialized successfully');
       
     } catch (err) {
       setError('Failed to access microphone. Please allow microphone access.');
@@ -690,6 +826,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     audioChunksRef.current = [];
     setIsRecording(true);
     setTranscript('');
+    setLastKnowledgeReferences([]); // Clear previous sources
+    setExpandedReferences(new Set()); // Clear expanded state
     setError(null);
     
     // Ensure audio context is running
@@ -855,6 +993,9 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       // Brief pause to show transcription result
       await new Promise(resolve => setTimeout(resolve, 500));
       
+      // Play thinking audio while processing
+      const thinkingAudioPromise = playThinkingAudio();
+      
       // Step 2: Process the transcribed text through the character pipeline
       setIsGeneratingResponse(true);
       console.log('🧠 Processing response...');
@@ -883,11 +1024,20 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       
       if (textData.status === 'success') {
         setLastResponse(textData.text_response || '');
+        setLastKnowledgeReferences(textData.knowledge_references || []);
         setIsGeneratingResponse(false);
         
         // Log performance metrics
         if (textData.audio_generation_time) {
           console.log(`✅ Voice audio generated in ~${textData.audio_generation_time}ms`);
+        }
+        
+        // Wait for thinking audio to finish before playing response
+        try {
+          await thinkingAudioPromise;
+          console.log('🤔 Thinking audio finished');
+        } catch (error) {
+          console.log('🤔 Thinking audio completed with error:', error);
         }
         
         // Play audio response if available
@@ -898,6 +1048,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           console.log('🔄 Auto-play disabled - preparing to restart wake word detection');
           setTimeout(() => {
             isProcessingWakeWordRef.current = false; // Reset processing flag
+            wakeWordRestartAttemptsRef.current = 0; // Reset restart attempts
             if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
               console.log('🚀 Restarting wake word detection (auto-play disabled)');
               startWakeWordDetection();
@@ -921,24 +1072,25 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
       console.error('Error processing recording:', err);
       setError(err instanceof Error ? err.message : 'Failed to process recording');
       
-      // Restart wake word detection after error
-      console.log('🔄 Error occurred - preparing to restart wake word detection');
-      setTimeout(() => {
-        isProcessingWakeWordRef.current = false; // Reset processing flag
-        if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
-          console.log('🚀 Restarting wake word detection after error');
-          startWakeWordDetection();
-        } else {
-          console.log('⚠️ Not restarting wake word after error - conditions not met:', {
-            isListening,
-            hasSpeechRecognition: !!speechRecognitionRef.current,
-            isRecording,
-            isTranscribing,
-            isGeneratingResponse,
-            isProcessing
-          });
-        }
-      }, 1500);
+                // Restart wake word detection after error
+          console.log('🔄 Error occurred - preparing to restart wake word detection');
+          setTimeout(() => {
+            isProcessingWakeWordRef.current = false; // Reset processing flag
+            wakeWordRestartAttemptsRef.current = 0; // Reset restart attempts
+            if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
+              console.log('🚀 Restarting wake word detection after error');
+              startWakeWordDetection();
+            } else {
+              console.log('⚠️ Not restarting wake word after error - conditions not met:', {
+                isListening,
+                hasSpeechRecognition: !!speechRecognitionRef.current,
+                isRecording,
+                isTranscribing,
+                isGeneratingResponse,
+                isProcessing
+              });
+            }
+          }, 1500);
     } finally {
       setIsProcessing(false);
       setIsTranscribing(false);
@@ -969,6 +1121,27 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     };
     
     animate();
+  };
+
+  const playThinkingAudio = async (): Promise<void> => {
+    try {
+      console.log('🤔 Fetching thinking audio...');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHARACTER_THINKING_AUDIO}/${characterId}`);
+      
+      if (!response.ok) {
+        console.warn('No thinking audio available for this character');
+        return;
+      }
+      
+      const data = await response.json();
+      
+      if (data.status === 'success' && data.audio_base64) {
+        console.log('🤔 Playing thinking audio...');
+        await playAudioResponse(data.audio_base64);
+      }
+    } catch (error) {
+      console.warn('Failed to fetch or play thinking audio:', error);
+    }
   };
 
   const playAudioResponse = async (audioBase64: string): Promise<void> => {
@@ -1012,6 +1185,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           console.log('🔄 Audio finished - preparing to restart wake word detection');
           setTimeout(() => {
             isProcessingWakeWordRef.current = false; // Reset processing flag
+            wakeWordRestartAttemptsRef.current = 0; // Reset restart attempts
             if (isListening && !speechRecognitionRef.current && !isRecording && !isTranscribing && !isGeneratingResponse && !isProcessing) {
               console.log('🚀 Restarting wake word detection after audio');
               startWakeWordDetection();
@@ -1059,6 +1233,80 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
     } else {
       initializeAudioMonitoring();
     }
+  };
+
+  // Knowledge References Component
+  const KnowledgeReferences: React.FC<{ references: KnowledgeReference[], messageIndex: number }> = ({ references, messageIndex }) => {
+    if (!references || references.length === 0) return null;
+
+    const isExpanded = expandedReferences.has(messageIndex);
+
+    const toggleExpanded = () => {
+      const newExpanded = new Set(expandedReferences);
+      if (isExpanded) {
+        newExpanded.delete(messageIndex);
+      } else {
+        newExpanded.add(messageIndex);
+      }
+      setExpandedReferences(newExpanded);
+    };
+
+    return (
+      <div className="mt-4 border-t border-white/20 pt-4">
+        <button
+          onClick={toggleExpanded}
+          className="flex items-center gap-2 text-sm text-white/70 hover:text-white transition-colors"
+        >
+          <BookOpen size={14} />
+          <span>{references.length} source{references.length > 1 ? 's' : ''} referenced</span>
+          {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+        
+        {isExpanded && (
+          <div className="mt-3 space-y-3 max-h-60 overflow-y-auto">
+            {references.map((ref, index) => (
+              <div key={ref.id} className="bg-white/10 backdrop-blur-sm rounded-lg p-3 text-sm border border-white/20">
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Search size={12} className="text-white/50 mt-0.5" />
+                    <span className="font-medium text-white/90">
+                      {ref.source || `Source ${ref.id}`}
+                    </span>
+                    {ref.relevance_score && (
+                      <span className="px-2 py-1 bg-blue-500/20 text-blue-300 rounded-full text-xs border border-blue-500/30">
+                        {ref.relevance_score}% match
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs text-white/50 capitalize">
+                    {ref.type}
+                  </span>
+                </div>
+                
+                <p className="text-white/80 mb-2 line-clamp-3">
+                  {ref.content}
+                </p>
+                
+                {(ref.keywords.length > 0 || ref.entities.length > 0) && (
+                  <div className="flex flex-wrap gap-1">
+                    {ref.keywords.slice(0, 3).map((keyword, kidx) => keyword && (
+                      <span key={kidx} className="px-2 py-1 bg-green-500/20 text-green-300 rounded-full text-xs border border-green-500/30">
+                        {keyword}
+                      </span>
+                    ))}
+                    {ref.entities.slice(0, 2).map((entity, eidx) => entity && (
+                      <span key={eidx} className="px-2 py-1 bg-purple-500/20 text-purple-300 rounded-full text-xs border border-purple-500/30">
+                        {entity}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const manualRecord = async () => {
@@ -1178,6 +1426,12 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
           cursor: pointer;
           border: 2px solid #1e293b;
           box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        .line-clamp-3 {
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
         }
       `}</style>
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white relative overflow-hidden">
@@ -1577,7 +1831,7 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
             </div>
           ) : isListening ? (
             <div className="flex flex-col items-center gap-2">
-              <span className="text-lg text-slate-300">Say "Hey Oppenheimer"</span>
+              <span className="text-lg text-slate-300">Say "{characterWakeword}"</span>
               <div className="flex flex-col items-center gap-1">
                 {isWakeWordListening ? (
                   <div className="flex items-center gap-2 text-sm text-blue-400">
@@ -1669,6 +1923,9 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
                   </div>
                   <div className="flex-1">
                     <p className="text-white/90 leading-relaxed">{lastResponse}</p>
+                    {lastKnowledgeReferences.length > 0 && (
+                      <KnowledgeReferences references={lastKnowledgeReferences} messageIndex={0} />
+                    )}
                   </div>
                 </div>
               </div>

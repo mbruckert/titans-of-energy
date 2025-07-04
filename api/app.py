@@ -4,6 +4,7 @@ from libraries.llm.inference import generate_styled_text, get_style_data, load_m
 from libraries.llm.preprocess import download_model as download_model_func
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
 from libraries.tts.inference import generate_audio, ensure_model_available, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
+from libraries.utils.embedding_models import EmbeddingModelManager, embedding_manager
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
 import psycopg2
@@ -127,7 +128,7 @@ def resolve_model_path(model_id: str) -> tuple[str, str]:
     Resolve model ID to actual model path and type.
 
     Args:
-        model_id: Model identifier (e.g., "google-gemma-3-4b-it-qat-q4_0-gguf")
+        model_id: Model identifier (e.g., "google-gemma-3-4b-it-qat-q4_0-gguf" or "custom-model-name")
 
     Returns:
         Tuple of (model_path, model_type)
@@ -156,6 +157,91 @@ def resolve_model_path(model_id: str) -> tuple[str, str]:
     if model_id in model_configs:
         config = model_configs[model_id]
         return config["path"], config["type"]
+
+    # Check for custom models in the models directory
+    if model_id.startswith('custom-'):
+        import os
+        import glob
+        import json
+        models_dir = "./models"
+        
+        # Look for files matching the custom model pattern
+        custom_name = model_id.replace('custom-', '', 1)
+        
+        # Check for GGUF files first
+        gguf_pattern = os.path.join(models_dir, f"{custom_name}*.gguf")
+        gguf_files = glob.glob(gguf_pattern)
+        if gguf_files:
+            return gguf_files[0], "gguf"
+        
+        # Check for directories (regular HF models)
+        possible_dirs = [
+            os.path.join(models_dir, custom_name),
+            os.path.join(models_dir, custom_name.replace('-', '_')),
+            os.path.join(models_dir, custom_name.replace(' ', '_')),
+            # Also check for the original directory name pattern (e.g., Llama_3.2)
+            os.path.join(models_dir, custom_name.replace('-', '_').replace('_', '.')),
+            os.path.join(models_dir, custom_name.replace('-', '.')),
+        ]
+        
+        # Also check all directories in models folder to find a match
+        if os.path.exists(models_dir):
+            for dir_name in os.listdir(models_dir):
+                dir_path = os.path.join(models_dir, dir_name)
+                if os.path.isdir(dir_path):
+                    # Check if this directory name could match our custom_name
+                    normalized_dir = dir_name.lower().replace('_', '-').replace('.', '-')
+                    normalized_custom = custom_name.lower().replace('_', '-').replace('.', '-')
+                    if normalized_dir == normalized_custom:
+                        possible_dirs.append(dir_path)
+
+        # Check for directories (regular HF models)
+        possible_dirs = [
+            os.path.join(models_dir, custom_name),
+            os.path.join(models_dir, custom_name.replace('-', '_')),
+            os.path.join(models_dir, custom_name.replace(' ', '_')),
+            # Also check for the original directory name pattern (e.g., Llama_3.2)
+            os.path.join(models_dir, custom_name.replace('-', '_').replace('_', '.')),
+            os.path.join(models_dir, custom_name.replace('-', '.')),
+        ]
+        
+        for model_dir in possible_dirs:
+            if os.path.exists(model_dir) and os.path.isdir(model_dir):
+                # Check if there's a .huggingface_repo file that stores the original repo
+                repo_file = os.path.join(model_dir, '.huggingface_repo')
+                if os.path.exists(repo_file):
+                    try:
+                        with open(repo_file, 'r') as f:
+                            original_repo = f.read().strip()
+                        print(f"Found original repo for {model_id}: {original_repo}")
+                        # Return the original repository name since it should be cached by transformers
+                        print(f"Using original repo name for transformers cache: {original_repo}")
+                        return original_repo, "huggingface"
+                    except Exception as e:
+                        print(f"Error reading repo file for {model_id}: {e}")
+                        # Fallback to local directory
+                        print(f"Fallback: using local directory path: {model_dir}")
+                        return model_dir, "huggingface"
+                
+                # Check if this directory has a config.json with model info
+                config_path = os.path.join(model_dir, 'config.json')
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, 'r') as f:
+                            config = json.load(f)
+                        
+                        # Check if this is a transformers model
+                        if 'model_type' in config or 'architectures' in config:
+                            # Use the directory path as fallback
+                            print(f"Using directory path for {model_id}: {model_dir}")
+                            return model_dir, "huggingface"
+                    except Exception as e:
+                        print(f"Error reading config for {model_id}: {e}")
+                        # Fallback to directory path
+                        return model_dir, "huggingface"
+                else:
+                    # Directory exists but no config - might be a GGUF or other format
+                    return model_dir, "huggingface"
 
     # Fallback: try to determine type based on the model_id
     if model_id.endswith('.gguf'):
@@ -579,6 +665,7 @@ def init_db():
             voice_cloning_reference_text TEXT,
             voice_cloning_settings JSONB,
             style_tuning_data_path VARCHAR(500),
+            wakeword VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -618,9 +705,114 @@ def init_db():
     except Exception as e:
         print(f"Migration note: {e}")
 
+    # Add wakeword column if it doesn't exist (migration)
+    try:
+        cur.execute("""
+            ALTER TABLE characters 
+            ADD COLUMN IF NOT EXISTS wakeword VARCHAR(255)
+        """)
+        print("Added wakeword column (if not exists)")
+    except Exception as e:
+        print(f"Migration note: {e}")
+
+    # Add thinking_audio_base64 column if it doesn't exist (migration)
+    try:
+        cur.execute("""
+            ALTER TABLE characters 
+            ADD COLUMN IF NOT EXISTS thinking_audio_base64 JSONB
+        """)
+        print("Added thinking_audio_base64 column (if not exists)")
+    except Exception as e:
+        print(f"Migration note: {e}")
+
+    # Add embedding configuration columns if they don't exist (migration)
+    try:
+        cur.execute("""
+            ALTER TABLE characters 
+            ADD COLUMN IF NOT EXISTS knowledge_base_embedding_config JSONB,
+            ADD COLUMN IF NOT EXISTS style_tuning_embedding_config JSONB
+        """)
+        print("Added embedding config columns (if not exists)")
+    except Exception as e:
+        print(f"Migration note: {e}")
+
     conn.commit()
     cur.close()
     conn.close()
+
+
+def generate_thinking_audio(character_name: str, voice_cloning_settings: dict, voice_cloning_audio_path: str, voice_reference_text: str) -> Optional[dict]:
+    """
+    Generate thinking audio phrases for a character using their TTS model.
+    Returns a dictionary of phrase -> base64_audio mappings.
+    """
+    thinking_phrases = [
+        "That's a great question, let me think about that for a second",
+        "Thanks for asking, let me think that over for a second", 
+        "An interesting inquiry, allow me a moment to reflect",
+        "Give me just a moment to consider your question"
+    ]
+    
+    if not voice_cloning_settings or not voice_cloning_audio_path:
+        print(f"Warning: No voice cloning settings for {character_name}, skipping thinking audio generation")
+        return None
+    
+    # Check if the voice cloning audio file exists
+    import os
+    if not os.path.exists(voice_cloning_audio_path):
+        print(f"Warning: Voice cloning audio file not found: {voice_cloning_audio_path}")
+        return None
+    
+    try:
+        # Import TTS generation function
+        from libraries.tts.inference import generate_cloned_audio_base64
+        
+        thinking_audio = {}
+        model = voice_cloning_settings.get('model', 'f5tts')
+        
+        print(f"🤔 Generating thinking audio for {character_name} using {model}...")
+        print(f"🎤 Using reference audio: {voice_cloning_audio_path}")
+        print(f"📝 Using reference text: {voice_reference_text[:50]}...")
+        
+        # Limit to 2 phrases for faster character creation (can be expanded later)
+        limited_phrases = thinking_phrases[:2]
+        
+        for i, phrase in enumerate(limited_phrases):
+            try:
+                print(f"🎤 Generating phrase {i+1}/{len(limited_phrases)}: '{phrase[:30]}...'")
+                
+                # Generate audio for this phrase with fast mode enabled
+                audio_base64 = generate_cloned_audio_base64(
+                    model=model,
+                    ref_audio=voice_cloning_audio_path,
+                    ref_text=voice_reference_text,
+                    gen_text=phrase,
+                    config=voice_cloning_settings,
+                    fast_mode=True
+                )
+                
+                if audio_base64:
+                    thinking_audio[f"phrase_{i+1}"] = audio_base64
+                    print(f"✅ Generated thinking audio {i+1}")
+                else:
+                    print(f"⚠️ Failed to generate audio for phrase {i+1}")
+                    
+            except Exception as e:
+                print(f"❌ Error generating thinking audio for phrase {i+1}: {e}")
+                continue
+        
+        if thinking_audio:
+            print(f"✅ Successfully generated {len(thinking_audio)} thinking audio clips for {character_name}")
+            return thinking_audio
+        else:
+            print(f"⚠️ Failed to generate any thinking audio for {character_name}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error generating thinking audio for {character_name}: {e}")
+        import traceback
+        print(f"❌ Full traceback: {traceback.format_exc()}")
+        return None
 
 
 @app.route('/')
@@ -645,6 +837,26 @@ def create_character():
         llm_config = json.loads(request.form.get('llm_config', '{}'))
         voice_cloning_settings = json.loads(
             request.form.get('voice_cloning_settings', '{}'))
+        wakeword = request.form.get('wakeword', f"hey {name.lower()}")
+
+        # Get embedding configurations
+        knowledge_base_embedding_config = json.loads(
+            request.form.get('knowledge_base_embedding_config', '{}'))
+        style_tuning_embedding_config = json.loads(
+            request.form.get('style_tuning_embedding_config', '{}'))
+
+        # Use default embedding config if not provided
+        default_embedding_config = {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+        
+        if not knowledge_base_embedding_config:
+            knowledge_base_embedding_config = default_embedding_config
+        
+        if not style_tuning_embedding_config:
+            style_tuning_embedding_config = default_embedding_config
 
         # Extract reference text from voice cloning settings
         voice_reference_text = voice_cloning_settings.get('ref_text', '')
@@ -706,7 +918,7 @@ def create_character():
 
                 # Process all documents in the directory
                 process_documents_for_collection(
-                    str(kb_docs_dir), str(kb_archive_dir), collection_name)
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
                 
                 print(f"Successfully processed {len(kb_file_paths)} knowledge base files for {name}")
             except Exception as e:
@@ -777,6 +989,30 @@ def create_character():
                     print(
                         f"Audio preprocessing skipped for {name} - using raw audio")
 
+        # Generate thinking audio after voice cloning setup is complete
+        thinking_audio_base64 = None
+        # Add environment variable to control thinking audio generation
+        generate_thinking_audio_enabled = os.getenv('GENERATE_THINKING_AUDIO', 'true').lower() == 'true'
+        
+        if voice_cloning_audio_path and voice_cloning_settings and generate_thinking_audio_enabled:
+            try:
+                print(f"🤔 Starting thinking audio generation for {name}...")
+                thinking_audio_base64 = generate_thinking_audio(
+                    name, voice_cloning_settings, voice_cloning_audio_path, voice_reference_text
+                )
+                if thinking_audio_base64:
+                    print(f"✅ Thinking audio generation completed for {name}")
+                else:
+                    print(f"⚠️ Thinking audio generation returned None for {name}")
+            except Exception as thinking_error:
+                print(f"❌ Thinking audio generation failed for {name}: {thinking_error}")
+                # Continue with character creation even if thinking audio fails
+                thinking_audio_base64 = None
+        elif not generate_thinking_audio_enabled:
+            print(f"⏭️ Thinking audio generation disabled via environment variable for {name}")
+        else:
+            print(f"⏭️ Skipping thinking audio generation for {name} (no voice cloning settings)")
+
         # Save style tuning data
         if 'style_tuning_file' in request.files:
             style_file = request.files['style_tuning_file']
@@ -801,7 +1037,7 @@ def create_character():
 
                     # Process the documents
                     process_documents_for_collection(
-                        str(style_docs_dir), str(style_archive_dir), collection_name)
+                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
                 except Exception as e:
                     print(f"Warning: Style tuning processing failed: {e}")
 
@@ -811,15 +1047,20 @@ def create_character():
         cur.execute("""
             INSERT INTO characters 
             (name, image_path, llm_model, llm_config, knowledge_base_path, 
-             voice_cloning_audio_path, voice_cloning_reference_text, voice_cloning_settings, style_tuning_data_path)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) 
+             voice_cloning_audio_path, voice_cloning_reference_text, voice_cloning_settings, 
+             style_tuning_data_path, wakeword, thinking_audio_base64,
+             knowledge_base_embedding_config, style_tuning_embedding_config)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             RETURNING id
         """, (
             name, image_path, llm_model, json.dumps(
                 llm_config), knowledge_base_path,
             voice_cloning_audio_path, voice_reference_text,
             json.dumps(voice_cloning_settings),
-            style_tuning_data_path
+            style_tuning_data_path, wakeword, 
+            json.dumps(thinking_audio_base64) if thinking_audio_base64 else None,
+            json.dumps(knowledge_base_embedding_config),
+            json.dumps(style_tuning_embedding_config)
         ))
 
         character_id = cur.fetchone()[0]
@@ -844,7 +1085,7 @@ def get_characters():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT id, name, image_path, llm_model, created_at 
+            SELECT id, name, image_path, llm_model, wakeword, created_at 
             FROM characters 
             ORDER BY created_at DESC
         """)
@@ -903,6 +1144,76 @@ def get_character(character_id):
         char_dict.pop('style_tuning_data_path', None)
 
         return jsonify({"character": char_dict, "status": "success"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-character-wakeword/<int:character_id>', methods=['GET'])
+def get_character_wakeword(character_id):
+    """Get the wakeword for a specific character."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT wakeword FROM characters WHERE id = %s", (character_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not result:
+            return jsonify({"error": "Character not found"}), 404
+
+        wakeword = result['wakeword'] or f"hey character"
+        
+        return jsonify({
+            "wakeword": wakeword,
+            "character_id": character_id,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-character-thinking-audio/<int:character_id>', methods=['GET'])
+def get_character_thinking_audio(character_id):
+    """Get a random thinking audio for a specific character."""
+    try:
+        import random
+        
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT thinking_audio_base64 FROM characters WHERE id = %s", (character_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not result:
+            return jsonify({"error": "Character not found"}), 404
+
+        thinking_audio_data = result['thinking_audio_base64']
+        
+        if not thinking_audio_data:
+            return jsonify({"error": "No thinking audio available for this character"}), 404
+        
+        # Parse JSON if it's a string
+        if isinstance(thinking_audio_data, str):
+            thinking_audio_data = json.loads(thinking_audio_data)
+        
+        # Select a random thinking audio
+        audio_keys = list(thinking_audio_data.keys())
+        if not audio_keys:
+            return jsonify({"error": "No thinking audio available for this character"}), 404
+        
+        selected_key = random.choice(audio_keys)
+        selected_audio = thinking_audio_data[selected_key]
+        
+        return jsonify({
+            "audio_base64": selected_audio,
+            "phrase_id": selected_key,
+            "character_id": character_id,
+            "status": "success"
+        }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -995,12 +1306,15 @@ def load_character():
                 model_path, model_type_str = resolve_model_path(
                     character['llm_model'])
 
-                # Determine model type
-                if 'api_key' in llm_config:
-                    model_type = ModelType.OPENAI_API
-                elif model_type_str == "gguf":
+                # Determine model type - prioritize model path resolution over config
+                if model_type_str == "gguf":
                     model_type = ModelType.GGUF
                 elif model_type_str == "openai_api":
+                    model_type = ModelType.OPENAI_API
+                elif model_type_str == "huggingface":
+                    model_type = ModelType.HUGGINGFACE
+                elif 'api_key' in llm_config:
+                    # Only use API if model type is ambiguous and api_key is present
                     model_type = ModelType.OPENAI_API
                 else:
                     model_type = ModelType.HUGGINGFACE
@@ -1139,28 +1453,55 @@ def ask_question_text():
 
         character_name = character['name']
 
+        # Get embedding configurations from character record
+        kb_embedding_config = character.get('knowledge_base_embedding_config')
+        style_embedding_config = character.get('style_tuning_embedding_config')
+        
+        # Use default embedding config if not set (for backward compatibility)
+        default_embedding_config = {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+        
+        if not kb_embedding_config:
+            kb_embedding_config = default_embedding_config
+            print(f"🔍 Using default embedding config for knowledge base")
+        
+        if not style_embedding_config:
+            style_embedding_config = default_embedding_config
+            print(f"🔍 Using default embedding config for style tuning")
+
         # Search knowledge base - ALWAYS provide 3 references regardless of fast mode
         knowledge_context = ""
         knowledge_references = []
         try:
             kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
+            print(f"🔍 Searching knowledge base collection: {kb_collection}")
             kb_result = query_collection(
-                kb_collection, question, n_results=3, return_structured=True)
+                kb_collection, question, n_results=3, return_structured=True, embedding_config=kb_embedding_config)
 
             if isinstance(kb_result, dict) and "references" in kb_result:
                 knowledge_context = kb_result.get("context", "")
                 knowledge_references = kb_result.get("references", [])
+                print(f"🔍 Knowledge base search successful - found {len(knowledge_references)} references")
+                print(f"🔍 Knowledge context length: {len(knowledge_context)} characters")
+                if knowledge_context:
+                    print(f"🔍 Knowledge context preview: {knowledge_context[:200]}...")
             else:
                 # Fallback to string format for backward compatibility
                 knowledge_context = str(kb_result)
+                print(f"🔍 Knowledge base search returned string format: {len(knowledge_context)} characters")
         except Exception as e:
             print(f"Knowledge base search failed: {e}")
+            print(f"🔍 Collection name attempted: {kb_collection}")
+            print(f"🔍 Question: {question}")
         
         # Get style examples - Use optimal number for speed while maintaining quality
         style_examples = []
         try:
             style_examples = get_style_data(
-                question, character_name, num_examples=2)
+                question, character_name, num_examples=2, embedding_config=style_embedding_config)
         except Exception as e:
             print(f"Style data retrieval failed: {e}")
 
@@ -1404,13 +1745,30 @@ def ask_question_audio():
         # Now process the transcribed text like the text endpoint
         question = transcript
 
+        # Get embedding configurations from character record
+        kb_embedding_config = character.get('knowledge_base_embedding_config')
+        style_embedding_config = character.get('style_tuning_embedding_config')
+        
+        # Use default embedding config if not set (for backward compatibility)
+        default_embedding_config = {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+        
+        if not kb_embedding_config:
+            kb_embedding_config = default_embedding_config
+        
+        if not style_embedding_config:
+            style_embedding_config = default_embedding_config
+
         # Search knowledge base
         knowledge_context = ""
         knowledge_references = []
         try:
             kb_collection = f"{character_name.lower().replace(' ', '')}-knowledge"
             kb_result = query_collection(
-                kb_collection, question, n_results=3, return_structured=True)
+                kb_collection, question, n_results=3, return_structured=True, embedding_config=kb_embedding_config)
 
             if isinstance(kb_result, dict) and "references" in kb_result:
                 knowledge_context = kb_result.get("context", "")
@@ -1425,7 +1783,7 @@ def ask_question_audio():
         style_examples = []
         try:
             style_examples = get_style_data(
-                question, character_name, num_examples=2)
+                question, character_name, num_examples=2, embedding_config=style_embedding_config)
         except Exception as e:
             print(f"Style data retrieval failed: {e}")
 
@@ -1554,24 +1912,39 @@ def ask_question_audio():
 def download_model_endpoint():
     """
     Download a model using the preprocess module.
-    Expects POST requests with 'model_name' and 'model_type' parameters.
+    Expects POST requests with 'model_name', 'model_type', and optional 'custom_name' parameters.
     """
     try:
         data = request.get_json()
         model_name = data.get('model_name')
         model_type = data.get('model_type')
+        custom_name = data.get('custom_name')  # Optional custom name for the model
 
         if not model_name or not model_type:
             return jsonify({"error": "model_name and model_type are required"}), 400
 
+        print(f"🔽 Download request received:")
+        print(f"  Model name: {model_name}")
+        print(f"  Model type: {model_type}")
+        print(f"  Custom name: {custom_name}")
+
         # Download the model
         try:
-            model_path = download_model_func(model_name, model_type)
-            return jsonify({"model_path": model_path, "status": "success"}), 200
+            model_path = download_model_func(model_name, model_type, custom_name=custom_name)
+            print(f"✅ Download completed successfully: {model_path}")
+            return jsonify({
+                "model_path": model_path, 
+                "custom_name": custom_name,
+                "status": "success"
+            }), 200
         except Exception as e:
+            print(f"❌ Download failed: {e}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
             return jsonify({"error": str(e)}), 500
 
     except Exception as e:
+        print(f"❌ Request processing failed: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1583,6 +1956,7 @@ def get_llm_models():
     try:
         from libraries.llm.inference import list_available_models
         import os
+        import glob
 
         # Get list of available models
         available_models = list_available_models()
@@ -1644,12 +2018,89 @@ def get_llm_models():
 
             model_info.append(model_data)
 
+        # Detect custom models in the models directory
+        models_dir = "./models"
+        if os.path.exists(models_dir):
+            # Track already included models to avoid duplicates
+            included_model_paths = set()
+            for model in model_info:
+                if model.get("path"):
+                    included_model_paths.add(os.path.abspath(model["path"]))
+            
+            # Find all GGUF files in the models directory
+            gguf_files = glob.glob(os.path.join(models_dir, "*.gguf"))
+            
+            for gguf_file in gguf_files:
+                abs_path = os.path.abspath(gguf_file)
+                if abs_path not in included_model_paths:
+                    filename = os.path.basename(gguf_file)
+                    # Generate a custom model ID and name
+                    custom_id = f"custom-{filename.replace('.gguf', '').replace('_', '-')}"
+                    custom_name = filename.replace('.gguf', '').replace('_', ' ').title()
+                    
+                    custom_model = {
+                        "id": custom_id,
+                        "name": f"{custom_name} (Custom)",
+                        "type": "gguf",
+                        "repo": "",
+                        "path": gguf_file,
+                        "requiresKey": False,
+                        "available": True,
+                        "downloaded": True,
+                        "custom": True
+                    }
+                    model_info.append(custom_model)
+            
+            # Find all directories that might contain HuggingFace models
+            for item in os.listdir(models_dir):
+                item_path = os.path.join(models_dir, item)
+                if os.path.isdir(item_path):
+                    # Check if this directory contains model files
+                    has_model_files = False
+                    for file in os.listdir(item_path):
+                        if file.endswith(('.bin', '.safetensors', '.gguf', '.json')):
+                            has_model_files = True
+                            break
+                    
+                    if has_model_files:
+                        # Check if this is already included as a supported model
+                        already_included = False
+                        for existing_model in model_info:
+                            if existing_model.get("path") and os.path.abspath(existing_model["path"]) == os.path.abspath(item_path):
+                                already_included = True
+                                break
+                            # Also check if the directory name matches a repo pattern
+                            if existing_model.get("repo") and existing_model["repo"].replace('/', '_') == item:
+                                already_included = True
+                                break
+                        
+                        if not already_included:
+                            # This is a custom model directory
+                            custom_id = f"custom-{item.replace('_', '-')}"
+                            custom_name = item.replace('_', ' ').title()
+                            
+                            custom_model = {
+                                "id": custom_id,
+                                "name": f"{custom_name} (Custom)",
+                                "type": "huggingface",
+                                "repo": "",
+                                "path": item_path,
+                                "requiresKey": False,
+                                "available": True,
+                                "downloaded": True,
+                                "custom": True
+                            }
+                            model_info.append(custom_model)
+
         return jsonify({
             "models": model_info,
             "status": "success"
         }), 200
 
     except Exception as e:
+        print(f"Error in get_llm_models: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1976,6 +2427,7 @@ def update_character(character_id):
     """
     Update a character's information and associated data.
     Expects form data with files and JSON configuration.
+    Only processes files when they have actually changed.
     """
     try:
         conn = get_db_connection()
@@ -1999,6 +2451,26 @@ def update_character(character_id):
             'llm_config', json.dumps(character['llm_config'] or {})))
         voice_cloning_settings = json.loads(request.form.get(
             'voice_cloning_settings', json.dumps(character['voice_cloning_settings'] or {})))
+        wakeword = request.form.get('wakeword', character.get('wakeword', f"hey {new_name.lower()}"))
+
+        # Get embedding configurations
+        knowledge_base_embedding_config = json.loads(
+            request.form.get('knowledge_base_embedding_config', '{}'))
+        style_tuning_embedding_config = json.loads(
+            request.form.get('style_tuning_embedding_config', '{}'))
+
+        # Use default embedding config if not provided or use existing character configs
+        default_embedding_config = {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+        
+        if not knowledge_base_embedding_config:
+            knowledge_base_embedding_config = character.get('knowledge_base_embedding_config') or default_embedding_config
+        
+        if not style_tuning_embedding_config:
+            style_tuning_embedding_config = character.get('style_tuning_embedding_config') or default_embedding_config
 
         # Extract reference text from voice cloning settings
         voice_reference_text = voice_cloning_settings.get(
@@ -2033,10 +2505,12 @@ def update_character(character_id):
                 image_path = str(new_character_dir /
                                  f"image_{image_file.filename}")
                 image_file.save(image_path)
+                print(f"Updated character image for {new_name}")
 
-        # Update knowledge base if new files provided (support multiple files)
+        # Update knowledge base ONLY if new files are provided
         kb_files = request.files.getlist('knowledge_base_file')
         if kb_files and any(f.filename for f in kb_files):
+            print(f"🔄 New knowledge base files detected for {new_name} - processing...")
             try:
                 # Delete old knowledge base files if they exist
                 if knowledge_base_path and os.path.exists(knowledge_base_path):
@@ -2058,6 +2532,13 @@ def update_character(character_id):
                 # Create temporary directories for processing
                 kb_docs_dir = new_character_dir / "kb_docs"
                 kb_archive_dir = new_character_dir / "kb_archive"
+                
+                # Clean up existing processing directories
+                if kb_docs_dir.exists():
+                    shutil.rmtree(kb_docs_dir)
+                if kb_archive_dir.exists():
+                    shutil.rmtree(kb_archive_dir)
+                    
                 kb_docs_dir.mkdir(exist_ok=True)
                 kb_archive_dir.mkdir(exist_ok=True)
 
@@ -2085,18 +2566,22 @@ def update_character(character_id):
                             "created_at": time.time()
                         }, f)
 
-                # Process all documents in the directory
+                # Process all documents in the directory (this will replace the existing collection)
                 process_documents_for_collection(
-                    str(kb_docs_dir), str(kb_archive_dir), collection_name)
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
                 
-                print(f"Successfully updated and processed {len(kb_file_paths)} knowledge base files for {new_name}")
+                print(f"✅ Successfully updated and processed {len(kb_file_paths)} knowledge base files for {new_name}")
             except Exception as e:
-                print(f"Warning: Knowledge base processing failed: {e}")
+                print(f"❌ Warning: Knowledge base processing failed: {e}")
+        else:
+            print(f"ℹ️  No new knowledge base files provided for {new_name} - keeping existing knowledge base")
 
-        # Update voice cloning audio if new file provided
+        # Update voice cloning audio ONLY if new file is provided
         if 'voice_cloning_audio' in request.files:
             voice_file = request.files['voice_cloning_audio']
             if voice_file.filename:
+                print(f"🔄 New voice cloning audio detected for {new_name} - processing...")
+                
                 # Delete old voice files if they exist
                 if voice_cloning_audio_path and os.path.exists(voice_cloning_audio_path):
                     os.remove(voice_cloning_audio_path)
@@ -2137,10 +2622,10 @@ def update_character(character_id):
                                 new_character_dir / "voice_processed.wav"),
                             **audio_processing_params
                         )
-                        print(f"Audio preprocessing completed for {new_name}")
+                        print(f"✅ Audio preprocessing completed for {new_name}")
                     except Exception as e:
-                        print(f"Warning: Voice preprocessing failed: {e}")
-                        print("Attempting fallback with safe mode...")
+                        print(f"❌ Warning: Voice preprocessing failed: {e}")
+                        print("🔄 Attempting fallback with safe mode...")
                         try:
                             # Retry with safe mode enabled
                             audio_processing_params['safe_mode'] = True
@@ -2150,17 +2635,24 @@ def update_character(character_id):
                                     new_character_dir / "voice_processed.wav"),
                                 **audio_processing_params
                             )
-                            print(f"Audio preprocessing completed for {new_name} with safe mode fallback")
+                            print(f"✅ Audio preprocessing completed for {new_name} with safe mode fallback")
                         except Exception as fallback_error:
-                            print(f"Warning: Voice preprocessing failed even with safe mode: {fallback_error}")
+                            print(f"❌ Warning: Voice preprocessing failed even with safe mode: {fallback_error}")
                             voice_cloning_audio_path = raw_audio_path
                 else:
                     voice_cloning_audio_path = raw_audio_path
+                    print(f"ℹ️  Audio preprocessing disabled for {new_name} - using raw audio")
+            else:
+                print(f"ℹ️  No new voice cloning audio provided for {new_name} - keeping existing audio")
+        else:
+            print(f"ℹ️  No new voice cloning audio provided for {new_name} - keeping existing audio")
 
-        # Update style tuning data if new file provided
+        # Update style tuning data ONLY if new file is provided
         if 'style_tuning_file' in request.files:
             style_file = request.files['style_tuning_file']
             if style_file.filename:
+                print(f"🔄 New style tuning file detected for {new_name} - processing...")
+                
                 # Delete old style tuning file if it exists
                 if style_tuning_data_path and os.path.exists(style_tuning_data_path):
                     os.remove(style_tuning_data_path)
@@ -2176,6 +2668,13 @@ def update_character(character_id):
                     # Create temporary directories for processing
                     style_docs_dir = new_character_dir / "style_docs"
                     style_archive_dir = new_character_dir / "style_archive"
+                    
+                    # Clean up existing processing directories
+                    if style_docs_dir.exists():
+                        shutil.rmtree(style_docs_dir)
+                    if style_archive_dir.exists():
+                        shutil.rmtree(style_archive_dir)
+                        
                     style_docs_dir.mkdir(exist_ok=True)
                     style_archive_dir.mkdir(exist_ok=True)
 
@@ -2183,11 +2682,17 @@ def update_character(character_id):
                     temp_style_path = style_docs_dir / style_file.filename
                     shutil.copy2(style_tuning_data_path, temp_style_path)
 
-                    # Process the documents
+                    # Process the documents (this will replace the existing collection)
                     process_documents_for_collection(
-                        str(style_docs_dir), str(style_archive_dir), collection_name)
+                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
+                    
+                    print(f"✅ Successfully updated and processed style tuning data for {new_name}")
                 except Exception as e:
-                    print(f"Warning: Style tuning processing failed: {e}")
+                    print(f"❌ Warning: Style tuning processing failed: {e}")
+            else:
+                print(f"ℹ️  No new style tuning file provided for {new_name} - keeping existing style data")
+        else:
+            print(f"ℹ️  No new style tuning file provided for {new_name} - keeping existing style data")
 
         # Update paths if character directory was renamed
         if new_name != old_name:
@@ -2210,19 +2715,22 @@ def update_character(character_id):
             SET name = %s, image_path = %s, llm_model = %s, llm_config = %s, 
                 knowledge_base_path = %s, voice_cloning_audio_path = %s, 
                 voice_cloning_reference_text = %s, voice_cloning_settings = %s, 
-                style_tuning_data_path = %s, updated_at = CURRENT_TIMESTAMP
+                style_tuning_data_path = %s, wakeword = %s, updated_at = CURRENT_TIMESTAMP,
+                knowledge_base_embedding_config = %s, style_tuning_embedding_config = %s
             WHERE id = %s
         """, (
             new_name, image_path, llm_model, json.dumps(llm_config),
             knowledge_base_path, voice_cloning_audio_path, voice_reference_text,
-            json.dumps(
-                voice_cloning_settings), style_tuning_data_path, character_id
+            json.dumps(voice_cloning_settings), style_tuning_data_path, wakeword,
+            json.dumps(knowledge_base_embedding_config), json.dumps(style_tuning_embedding_config),
+            character_id
         ))
 
         conn.commit()
         cur.close()
         conn.close()
 
+        print(f"✅ Character '{new_name}' updated successfully")
         return jsonify({
             "message": f"Character updated successfully",
             "character_id": character_id,
@@ -2231,6 +2739,7 @@ def update_character(character_id):
         }), 200
 
     except Exception as e:
+        print(f"❌ Error updating character: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -2423,18 +2932,24 @@ def optimize_for_character():
                 llm_config = character['llm_config']
                 llm_cache_key = f"{character_name}_llm"
 
-                # Determine model type
-                if 'api_key' in llm_config:
-                    model_type = ModelType.OPENAI_API
-                elif character['llm_model'].endswith('.gguf'):
+                # Determine model type - prioritize model path over config
+                model_path, model_type_str = resolve_model_path(character['llm_model'])
+                if model_type_str == "gguf":
                     model_type = ModelType.GGUF
+                elif model_type_str == "openai_api":
+                    model_type = ModelType.OPENAI_API
+                elif model_type_str == "huggingface":
+                    model_type = ModelType.HUGGINGFACE
+                elif 'api_key' in llm_config:
+                    # Only use API if model type is ambiguous and api_key is present
+                    model_type = ModelType.OPENAI_API
                 else:
                     model_type = ModelType.HUGGINGFACE
 
                 model = preload_llm_model(
                     model_type=model_type,
                     model_config={
-                        'model_path': character['llm_model'],
+                        'model_path': model_path,
                         **llm_config
                     },
                     cache_key=llm_cache_key
@@ -2472,6 +2987,169 @@ def optimize_for_character():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/check-character-name', methods=['POST'])
+def check_character_name():
+    """
+    Check if a character name already exists in the database.
+    Expects: {"name": str}
+    Returns: {"exists": bool, "status": "success"}
+    """
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        
+        # Normalize the name for comparison (case-insensitive)
+        normalized_name = name.strip().lower()
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM characters WHERE LOWER(name) = %s", (normalized_name,))
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        
+        exists = count > 0
+        
+        return jsonify({
+            "exists": exists,
+            "name": name,
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-embedding-models', methods=['GET'])
+def get_embedding_models():
+    """Get available embedding models."""
+    try:
+        available_models = embedding_manager.get_available_models()
+        
+        return jsonify({
+            "success": True,
+            "models": available_models
+        })
+        
+    except Exception as e:
+        print(f"Error getting embedding models: {e}")
+        return jsonify({"error": "Failed to get embedding models"}), 500
+
+
+@app.route('/test-embedding-config', methods=['POST'])
+def test_embedding_config():
+    """Test an embedding configuration."""
+    try:
+        data = request.get_json()
+        model_type = data.get('model_type')
+        model_name = data.get('model_name')
+        config = data.get('config', {})
+        
+        if not model_type or not model_name:
+            return jsonify({"error": "model_type and model_name are required"}), 400
+        
+        # Test the configuration by creating and testing the model
+        test_model_id = f"test_{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Try to load the model
+            embedding_model = embedding_manager.load_model(
+                model_id=test_model_id,
+                model_type=model_type,
+                model_name=model_name,
+                config=config
+            )
+            
+            # Test with a simple text
+            test_text = "This is a test sentence for embedding."
+            embedding = embedding_model.embed_text(test_text)
+            
+            # Clean up test model
+            embedding_manager.unload_model(test_model_id)
+            
+            return jsonify({
+                "success": True,
+                "message": "Embedding configuration is valid",
+                "embedding_dimensions": len(embedding)
+            })
+            
+        except Exception as model_error:
+            # Clean up test model if it was partially created
+            embedding_manager.unload_model(test_model_id)
+            
+            return jsonify({
+                "success": False,
+                "error": f"Configuration test failed: {str(model_error)}"
+            }), 400
+        
+    except Exception as e:
+        print(f"Error testing embedding config: {e}")
+        return jsonify({"error": "Failed to test embedding configuration"}), 500
+
+
+@app.route('/get-loaded-embedding-models', methods=['GET'])
+def get_loaded_embedding_models():
+    """Get information about currently loaded embedding models."""
+    try:
+        loaded_models = embedding_manager.list_models()
+        
+        return jsonify({
+            "success": True,
+            "models": loaded_models
+        })
+        
+    except Exception as e:
+        print(f"Error getting loaded embedding models: {e}")
+        return jsonify({"error": "Failed to get loaded embedding models"}), 500
+
+
+@app.route('/unload-embedding-model', methods=['POST'])
+def unload_embedding_model():
+    """Unload a specific embedding model."""
+    try:
+        data = request.get_json()
+        model_id = data.get('model_id')
+        
+        if not model_id:
+            return jsonify({"error": "model_id is required"}), 400
+        
+        success = embedding_manager.unload_model(model_id)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"Embedding model '{model_id}' unloaded successfully"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": f"Embedding model '{model_id}' not found"
+            }), 404
+        
+    except Exception as e:
+        print(f"Error unloading embedding model: {e}")
+        return jsonify({"error": "Failed to unload embedding model"}), 500
+
+
+@app.route('/unload-all-embedding-models', methods=['POST'])
+def unload_all_embedding_models():
+    """Unload all embedding models."""
+    try:
+        embedding_manager.unload_all_models()
+        
+        return jsonify({
+            "success": True,
+            "message": "All embedding models unloaded successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error unloading all embedding models: {e}")
+        return jsonify({"error": "Failed to unload embedding models"}), 500
 
 
 if __name__ == '__main__':

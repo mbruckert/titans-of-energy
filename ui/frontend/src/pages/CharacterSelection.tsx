@@ -51,7 +51,7 @@ function CharacterSelection() {
     setIsModalOpen(true);
   };
 
-  const handleSubmitCharacter = (name: string, imageFile: File) => {
+  const handleSubmitCharacter = (name: string, imageFile: File, wakeword: string) => {
     // Initialize global file storage if it doesn't exist
     if (!window.characterCreationFiles) {
       window.characterCreationFiles = {};
@@ -62,10 +62,12 @@ function CharacterSelection() {
     
     // Store character data in session storage (without File objects)
     sessionStorage.setItem('newCharacterData', JSON.stringify({
-      name
+      name,
+      wakeword
     }));
     
     console.log('Character image stored for creation:', imageFile.name);
+    console.log('Character wakeword:', wakeword);
     
     setIsModalOpen(false);
     navigate('/model-selection');

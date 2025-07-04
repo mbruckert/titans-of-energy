@@ -3,6 +3,7 @@ Knowledge base preprocessing module for text processing and ChromaDB storage.
 
 This module handles text cleaning, chunking, keyword extraction, entity recognition,
 and embedding generation for documents to be stored in ChromaDB.
+Supports both OpenAI and open source embedding models.
 """
 
 import json
@@ -11,7 +12,7 @@ import re
 import shutil
 import uuid
 import warnings
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing
 from functools import partial
@@ -21,19 +22,18 @@ from chromadb import PersistentClient
 from chromadb.config import Settings
 from dotenv import load_dotenv
 from keybert import KeyBERT
-from openai import OpenAI
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+
+# Import unified embedding models
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+from embedding_models import get_embedding_model, EmbeddingModelType, embedding_manager
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY must be set in environment variables")
-
 CHROMA_DB_PATH = "chroma_db"
-EMBEDDING_MODEL = "text-embedding-ada-002"
 SPACY_MODEL = "en_core_web_sm"
 
 # Performance configuration
@@ -56,7 +56,6 @@ except OSError:
         f"spaCy model '{SPACY_MODEL}' not found. Install with: python -m spacy download {SPACY_MODEL}")
 
 kw_model = KeyBERT()
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
 chroma_client = PersistentClient(path=CHROMA_DB_PATH)
 
 # Device detection for GPU acceleration
@@ -163,60 +162,67 @@ def extract_entities(text: str) -> List[Tuple[str, str]]:
     return [(ent.text, ent.label_) for ent in doc.ents]
 
 
-def embed_text(text: str) -> List[float]:
+def embed_text(text: str, embedding_config: Dict[str, Any]) -> List[float]:
     """
-    Generate embedding for text using OpenAI's embedding model.
+    Generate embedding for text using configured embedding model.
     
     Args:
         text: Text to embed
+        embedding_config: Configuration containing model type, name, and settings
 
     Returns:
         Embedding vector as list of floats
     """
     try:
-        response = openai_client.embeddings.create(
-            input=[text],
-            model=EMBEDDING_MODEL
+        model_id = embedding_config.get("model_id", "default")
+        model_type = embedding_config.get("model_type", "sentence_transformers")
+        model_name = embedding_config.get("model_name", "all-MiniLM-L6-v2")
+        
+        # Get or create embedding model
+        embedding_model = get_embedding_model(
+            model_id=model_id,
+            model_type=model_type,
+            model_name=model_name,
+            config=embedding_config.get("config", {})
         )
-        return response.data[0].embedding
+        
+        return embedding_model.embed_text(text)
     except Exception as e:
         print(f"Error generating embedding: {e}")
         raise
 
 
-def embed_texts_batch(texts: List[str]) -> List[List[float]]:
+def embed_texts_batch(texts: List[str], embedding_config: Dict[str, Any]) -> List[List[float]]:
     """
-    Generate embeddings for multiple texts in a single API call for better performance.
+    Generate embeddings for multiple texts using configured embedding model.
     
     Args:
         texts: List of texts to embed
+        embedding_config: Configuration containing model type, name, and settings
 
     Returns:
         List of embedding vectors
     """
     try:
-        # OpenAI API has a limit on batch size, so we process in chunks
-        all_embeddings = []
+        model_id = embedding_config.get("model_id", "default")
+        model_type = embedding_config.get("model_type", "sentence_transformers")
+        model_name = embedding_config.get("model_name", "all-MiniLM-L6-v2")
         
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i:i + BATCH_SIZE]
-            print(f"  📊 Processing embedding batch {i//BATCH_SIZE + 1}/{(len(texts) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} texts)")
-            
-            response = openai_client.embeddings.create(
-                input=batch,
-                model=EMBEDDING_MODEL
-            )
-            
-            batch_embeddings = [data.embedding for data in response.data]
-            all_embeddings.extend(batch_embeddings)
+        # Get or create embedding model
+        embedding_model = get_embedding_model(
+            model_id=model_id,
+            model_type=model_type,
+            model_name=model_name,
+            config=embedding_config.get("config", {})
+        )
         
-        return all_embeddings
+        return embedding_model.embed_texts_batch(texts)
     except Exception as e:
         print(f"Error generating batch embeddings: {e}")
         raise
 
 
-def process_chunk_metadata(chunk_data: Tuple[int, str, str]) -> Dict[str, Any]:
+def process_chunk_metadata(chunk_data: Tuple[int, str, str]) -> Optional[Dict[str, Any]]:
     """
     Process metadata for a single chunk (for parallel processing).
     
@@ -224,7 +230,7 @@ def process_chunk_metadata(chunk_data: Tuple[int, str, str]) -> Dict[str, Any]:
         chunk_data: Tuple of (index, chunk_text, source)
     
     Returns:
-        Dictionary with chunk metadata (without embedding)
+        Dictionary with chunk metadata (without embedding) or None if failed
     """
     i, chunk, source = chunk_data
     
@@ -252,7 +258,7 @@ def process_chunk_metadata(chunk_data: Tuple[int, str, str]) -> Dict[str, Any]:
         return None
 
 
-def process_document(file_path: str, source: str) -> List[Dict[str, Any]]:
+def process_document(file_path: str, source: str, embedding_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Process a document into chunks with metadata and embeddings using parallel processing.
 
@@ -298,7 +304,7 @@ def process_document(file_path: str, source: str) -> List[Dict[str, Any]]:
     
     print(f"  🧠 Generating embeddings for {len(texts)} chunks...")
     try:
-        embeddings = embed_texts_batch(texts)
+        embeddings = embed_texts_batch(texts, embedding_config)
         
         # Combine metadata with embeddings
         for chunk, embedding in zip(chunk_results, embeddings):
@@ -370,23 +376,23 @@ def move_processed_files(source_dir: str, target_dir: str) -> None:
             except Exception as e:
                 print(f"Error moving {filename}: {e}")
 
-def process_single_file(file_info: Tuple[str, str, str]) -> Tuple[str, List[Dict[str, Any]]]:
+def process_single_file(file_info: Tuple[str, str, str, Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Process a single file and return its chunks.
     
     Args:
-        file_info: Tuple of (file_path, filename, file_type)
+        file_info: Tuple of (file_path, filename, file_type, embedding_config)
     
     Returns:
         Tuple of (filename, chunk_data)
     """
-    file_path, filename, file_type = file_info
+    file_path, filename, file_type, embedding_config = file_info
     
     try:
         if file_type == "txt":
-            chunk_data = process_document(file_path, filename)
+            chunk_data = process_document(file_path, filename, embedding_config)
         elif file_type == "json":
-            chunk_data = process_json_document(file_path, filename)
+            chunk_data = process_json_document(file_path, filename, embedding_config)
         else:
             return filename, []
             
@@ -396,7 +402,7 @@ def process_single_file(file_info: Tuple[str, str, str]) -> Tuple[str, List[Dict
         return filename, []
 
 
-def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collection_name: str) -> None:
+def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collection_name: str, embedding_config: Dict[str, Any]) -> None:
     """
     Process all new text and JSON files and add them to ChromaDB collection using parallel processing.
 
@@ -424,11 +430,11 @@ def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collec
     file_infos = []
     for filename in txt_files:
         file_path = os.path.join(new_docs_dir, filename)
-        file_infos.append((file_path, filename, "txt"))
+        file_infos.append((file_path, filename, "txt", embedding_config))
     
     for filename in json_files:
         file_path = os.path.join(new_docs_dir, filename)
-        file_infos.append((file_path, filename, "json"))
+        file_infos.append((file_path, filename, "json", embedding_config))
     
     # Process files in parallel (but limit concurrency to avoid overwhelming OpenAI API)
     all_chunks = []
@@ -459,7 +465,7 @@ def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collec
     print("🎉 Processing complete!")
 
 
-def process_json_document(file_path: str, source: str) -> List[Dict[str, Any]]:
+def process_json_document(file_path: str, source: str, embedding_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Process a JSON document containing Q&A pairs or other structured data using optimized processing.
 
@@ -585,7 +591,7 @@ def process_json_document(file_path: str, source: str) -> List[Dict[str, Any]]:
     
     print(f"  🧠 Generating embeddings for {len(texts)} JSON chunks...")
     try:
-        embeddings = embed_texts_batch(texts)
+        embeddings = embed_texts_batch(texts, embedding_config)
         
         # Combine metadata with embeddings
         processed_chunks = []

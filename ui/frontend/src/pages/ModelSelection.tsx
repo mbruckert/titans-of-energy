@@ -25,6 +25,12 @@ const ModelSelection = () => {
     const [downloading, setDownloading] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
+    // Custom model state
+    const [showCustomModel, setShowCustomModel] = useState<boolean>(false);
+    const [customModelUrl, setCustomModelUrl] = useState<string>('');
+    const [customModelName, setCustomModelName] = useState<string>('');
+    const [isCustomModelDownloading, setIsCustomModelDownloading] = useState<boolean>(false);
+
     // Prefill system prompt based on character name
     useEffect(() => {
         const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
@@ -128,6 +134,68 @@ const ModelSelection = () => {
         if (model.available) {
             setSelectedModel(model.id);
             setShowApiKey(model.requiresKey);
+        }
+    };
+
+    const downloadCustomModel = async () => {
+        if (!customModelUrl.trim() || !customModelName.trim()) {
+            setError('Please provide both a model URL and a name');
+            return;
+        }
+
+        try {
+            setIsCustomModelDownloading(true);
+            setError(null);
+            
+            // Determine model type based on URL
+            let modelType = 'huggingface';
+            if (customModelUrl.includes('.gguf')) {
+                modelType = 'huggingface'; // GGUF files are still downloaded via HF
+            }
+            
+            console.log('Downloading custom model:', {
+                model_name: customModelUrl,
+                model_type: modelType,
+                custom_name: customModelName
+            });
+            
+            const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.DOWNLOAD_MODEL}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model_name: customModelUrl,
+                    model_type: modelType,
+                    custom_name: customModelName
+                }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to download model');
+            }
+
+            const result = await response.json();
+            console.log('Model downloaded successfully:', result);
+            
+            // Refresh the models list to include the newly downloaded model
+            await loadModels();
+            
+            // Reset the custom model form
+            setCustomModelUrl('');
+            setCustomModelName('');
+            setShowCustomModel(false);
+            
+            // Show success message
+            alert(`Model "${customModelName}" downloaded successfully! You can now select it from the available models.`);
+            
+        } catch (err) {
+            console.error('Download failed:', err);
+            const errorMessage = err instanceof Error ? err.message : 'Failed to download model';
+            setError(`Download failed: ${errorMessage}`);
+        } finally {
+            setIsCustomModelDownloading(false);
         }
     };
 
@@ -265,6 +333,91 @@ const ModelSelection = () => {
                             )}
                         </div>
                     ))}
+                </div>
+
+                {/* Custom Model Section */}
+                <div className="border-t pt-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-semibold">Custom Model</h3>
+                        <button
+                            onClick={() => setShowCustomModel(!showCustomModel)}
+                            className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                        >
+                            {showCustomModel ? 'Hide' : 'Add Custom Model'}
+                        </button>
+                    </div>
+                    
+                    {showCustomModel && (
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-4">
+                            <div className="text-sm text-gray-600 mb-4">
+                                <p className="mb-2">💡 <strong>How to add a custom model:</strong></p>
+                                <ul className="list-disc list-inside space-y-1 text-xs">
+                                    <li><strong>For GGUF models:</strong> Paste the direct link to the .gguf file (e.g., https://huggingface.co/user/model/blob/main/model.gguf)</li>
+                                    <li><strong>For regular models:</strong> Paste the Hugging Face repository URL (e.g., https://huggingface.co/microsoft/DialoGPT-medium)</li>
+                                    <li><strong>Repository format:</strong> You can also use repo/model format (e.g., microsoft/DialoGPT-medium)</li>
+                                </ul>
+                            </div>
+                            
+                            <div>
+                                <label htmlFor="customModelName" className="block text-sm font-medium text-gray-700 mb-1">
+                                    Model Name
+                                </label>
+                                <input
+                                    type="text"
+                                    id="customModelName"
+                                    value={customModelName}
+                                    onChange={(e) => setCustomModelName(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black text-sm"
+                                    placeholder="Enter a name for your custom model"
+                                />
+                            </div>
+                            
+                            <div>
+                                <label htmlFor="customModelUrl" className="block text-sm font-medium text-gray-700 mb-1">
+                                    Model URL or Repository
+                                </label>
+                                <input
+                                    type="text"
+                                    id="customModelUrl"
+                                    value={customModelUrl}
+                                    onChange={(e) => setCustomModelUrl(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black text-sm"
+                                    placeholder="https://huggingface.co/user/model or user/model"
+                                />
+                            </div>
+                            
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={downloadCustomModel}
+                                    disabled={isCustomModelDownloading || !customModelUrl.trim() || !customModelName.trim()}
+                                    className={`px-4 py-2 rounded-md text-sm font-medium ${
+                                        !isCustomModelDownloading && customModelUrl.trim() && customModelName.trim()
+                                            ? 'bg-blue-600 text-white hover:bg-blue-700'
+                                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                    }`}
+                                >
+                                    {isCustomModelDownloading ? (
+                                        <div className="flex items-center">
+                                            <Loader size={16} className="animate-spin mr-2" />
+                                            Downloading...
+                                        </div>
+                                    ) : (
+                                        'Download Model'
+                                    )}
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setShowCustomModel(false);
+                                        setCustomModelUrl('');
+                                        setCustomModelName('');
+                                    }}
+                                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {showApiKey && (

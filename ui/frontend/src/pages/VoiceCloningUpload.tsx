@@ -88,12 +88,96 @@ const VoiceCloningUpload = () => {
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const droppedFiles = Array.from(e.dataTransfer.files);
-    setFiles(prevFiles => [...prevFiles, ...droppedFiles]);
+    
+    // Validate file format and duration
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+    
+    droppedFiles.forEach(file => {
+      // Check file format
+      if (!file.name.toLowerCase().endsWith('.wav')) {
+        invalidFiles.push(`${file.name}: Only WAV files are allowed`);
+        return;
+      }
+      
+      // Check file duration (we'll do this with audio element)
+      const audio = new Audio();
+      const objectUrl = URL.createObjectURL(file);
+      
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration;
+        if (duration < 5 || duration > 30) {
+          invalidFiles.push(`${file.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
+        } else {
+          validFiles.push(file);
+        }
+        URL.revokeObjectURL(objectUrl);
+        
+        // Update files state after validation
+        if (validFiles.length > 0) {
+          setFiles(prevFiles => [...prevFiles, ...validFiles]);
+        }
+        
+        // Show error for invalid files
+        if (invalidFiles.length > 0) {
+          setError(invalidFiles.join(', '));
+        }
+      };
+      
+      audio.onerror = () => {
+        invalidFiles.push(`${file.name}: Could not read audio file`);
+        URL.revokeObjectURL(objectUrl);
+      };
+      
+      audio.src = objectUrl;
+    });
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || []);
-    setFiles(prevFiles => [...prevFiles, ...selectedFiles]);
+    
+    // Validate file format and duration
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+    
+    selectedFiles.forEach(file => {
+      // Check file format
+      if (!file.name.toLowerCase().endsWith('.wav')) {
+        invalidFiles.push(`${file.name}: Only WAV files are allowed`);
+        return;
+      }
+      
+      // Check file duration (we'll do this with audio element)
+      const audio = new Audio();
+      const objectUrl = URL.createObjectURL(file);
+      
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration;
+        if (duration < 5 || duration > 30) {
+          invalidFiles.push(`${file.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
+        } else {
+          validFiles.push(file);
+        }
+        URL.revokeObjectURL(objectUrl);
+        
+        // Update files state after validation
+        if (validFiles.length > 0) {
+          setFiles(prevFiles => [...prevFiles, ...validFiles]);
+        }
+        
+        // Show error for invalid files
+        if (invalidFiles.length > 0) {
+          setError(invalidFiles.join(', '));
+        }
+      };
+      
+      audio.onerror = () => {
+        invalidFiles.push(`${file.name}: Could not read audio file`);
+        URL.revokeObjectURL(objectUrl);
+      };
+      
+      audio.src = objectUrl;
+    });
   };
 
   const removeFile = (index: number) => {
@@ -193,6 +277,11 @@ const VoiceCloningUpload = () => {
       
       // Add basic character info
       formData.append('name', characterData.name);
+      
+      // Add wakeword if provided
+      if (characterData.wakeword) {
+        formData.append('wakeword', characterData.wakeword);
+      }
       
       // Add LLM configuration
       if (characterData.llm_model) {
@@ -376,14 +465,14 @@ const VoiceCloningUpload = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your audio files or drag and drop</p>
-        <p className="text-xs text-gray-500 mb-2">Accepted formats: MP3, WAV, M4A</p> 
-        <p className="text-xs text-gray-500 mb-4">Best results with 15-second clips (works with 5–60 seconds)</p>
+        <p className="text-xs text-gray-500 mb-2">Accepted formats: WAV only</p> 
+        <p className="text-xs text-gray-500 mb-4">Duration must be between 5-30 seconds for best results</p>
         <input
           type="file"
           id="file-upload"
           className="hidden"
           onChange={handleFileSelect}
-          accept=".mp3,.wav,.m4a"
+          accept=".wav"
           multiple
         />
         <button

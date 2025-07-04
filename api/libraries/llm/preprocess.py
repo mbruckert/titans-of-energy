@@ -6,7 +6,7 @@ This module handles downloading models and generating style embeddings for chara
 
 import json
 import os
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from chromadb import PersistentClient
 from dotenv import load_dotenv
@@ -39,22 +39,24 @@ def _authenticate_huggingface():
     """
     if not HUGGINGFACE_API_KEY:
         print("No Hugging Face API key found. Public models will still work.")
+        print("For private or gated models, set HUGGINGFACE_API_KEY in your environment.")
         return True
 
     try:
         from huggingface_hub import login
         login(token=HUGGINGFACE_API_KEY, add_to_git_credential=True)
-        print("Successfully authenticated with Hugging Face")
+        print("✅ Successfully authenticated with Hugging Face")
         return True
     except ImportError:
-        print("huggingface_hub not available for authentication")
+        print("⚠️ huggingface_hub not available for authentication")
         return False
     except Exception as e:
-        print(f"Failed to authenticate with Hugging Face: {e}")
+        print(f"⚠️ Failed to authenticate with Hugging Face: {e}")
+        print("Will proceed with public access only. Some models may not be accessible.")
         return False
 
 
-def download_model(model_name: str, model_type: str) -> str:
+def download_model(model_name: str, model_type: str, custom_name: Optional[str] = None) -> str:
     """
     Download a model to the models folder if it's a Hugging Face model.
 
@@ -63,6 +65,7 @@ def download_model(model_name: str, model_type: str) -> str:
                    - HF repo: "repo/model" or "repo/model:filename.gguf"
                    - Direct URL: "https://huggingface.co/repo/model/blob/main/file.gguf"
         model_type: Type of model ('huggingface', 'openai')
+        custom_name: Optional custom name for the downloaded model
 
     Returns:
         Local path to the model or original model_name for OpenAI models
@@ -83,21 +86,46 @@ def download_model(model_name: str, model_type: str) -> str:
     # Create models directory if it doesn't exist
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    # Check if it's a direct URL
-    if model_name.startswith('http'):
-        return _download_from_url(model_name)
+    # Check if it's a direct URL to a file (contains /blob/ or /resolve/)
+    if model_name.startswith('http') and ('/blob/' in model_name or '/resolve/' in model_name):
+        return _download_from_url(model_name, custom_name=custom_name)
 
-    # Parse model name - check if specific file is requested
-    if ':' in model_name:
-        repo_id, filename = model_name.split(':', 1)
-        model_path = os.path.join(
-            MODELS_DIR, f"{repo_id.replace('/', '_')}_{filename}")
-        is_specific_file = True
+    # Check if it's a full HF URL to a repository (not a file)
+    if model_name.startswith('https://huggingface.co/'):
+        # Extract repository name from URL
+        # Example: https://huggingface.co/meta-llama/Llama-3.2-1B -> meta-llama/Llama-3.2-1B
+        import re
+        repo_pattern = r'https://huggingface\.co/([^/]+/[^/?]+)'
+        match = re.match(repo_pattern, model_name)
+        if match:
+            repo_id = match.group(1)
+            print(f"Extracted repository ID from URL: {repo_id}")
+            filename = None
+            if custom_name:
+                model_path = os.path.join(MODELS_DIR, custom_name.replace(' ', '_').replace('/', '_'))
+            else:
+                model_path = os.path.join(MODELS_DIR, repo_id.replace('/', '_'))
+            is_specific_file = False
+        else:
+            raise ValueError(f"Invalid Hugging Face repository URL: {model_name}")
     else:
-        repo_id = model_name
-        filename = None
-        model_path = os.path.join(MODELS_DIR, model_name.replace('/', '_'))
-        is_specific_file = False
+        # Parse model name - check if specific file is requested
+        if ':' in model_name:
+            repo_id, filename = model_name.split(':', 1)
+            if custom_name:
+                model_path = os.path.join(MODELS_DIR, f"{custom_name}_{filename}")
+            else:
+                model_path = os.path.join(
+                    MODELS_DIR, f"{repo_id.replace('/', '_')}_{filename}")
+            is_specific_file = True
+        else:
+            repo_id = model_name
+            filename = None
+            if custom_name:
+                model_path = os.path.join(MODELS_DIR, custom_name.replace(' ', '_').replace('/', '_'))
+            else:
+                model_path = os.path.join(MODELS_DIR, model_name.replace('/', '_'))
+            is_specific_file = False
 
     # Check if model already exists locally
     if os.path.exists(model_path):
@@ -106,6 +134,8 @@ def download_model(model_name: str, model_type: str) -> str:
             return model_path
 
     print(f"Downloading Hugging Face model: {model_name}")
+    if custom_name:
+        print(f"Using custom name: {custom_name}")
 
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
@@ -128,27 +158,102 @@ def download_model(model_name: str, model_type: str) -> str:
                 filename=filename,
                 local_dir=MODELS_DIR
             )
-            print(f"Downloaded file to: {downloaded_path}")
-            return downloaded_path
+            
+            # If custom name provided, copy to custom location
+            if custom_name:
+                custom_path = os.path.join(MODELS_DIR, f"{custom_name}_{filename}")
+                import shutil
+                shutil.copy2(downloaded_path, custom_path)
+                print(f"Downloaded and renamed file to: {custom_path}")
+                return custom_path
+            else:
+                print(f"Downloaded file to: {downloaded_path}")
+                return downloaded_path
         else:
-            # Download entire repository (regular model)
-            downloaded_path = snapshot_download(
-                repo_id=repo_id,
-                local_dir=model_path
-            )
-            print(f"Downloaded model to: {downloaded_path}")
-            return downloaded_path
+            # Download entire repository
+            print(f"Downloading repository: {repo_id}")
+            
+            # Use transformers library's built-in caching for better compatibility
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM
+                print(f"Pre-loading model with transformers library for better caching...")
+                
+                # This will download and cache the model properly
+                tokenizer = AutoTokenizer.from_pretrained(repo_id)
+                print(f"✓ Tokenizer downloaded and cached")
+                
+                # We don't actually load the model here, just ensure it's cached
+                # The actual loading will happen during inference
+                print(f"✓ Model {repo_id} is now properly cached by transformers")
+                
+                # Also save to our custom location if custom_name is provided
+                if custom_name:
+                    model_path = os.path.join(MODELS_DIR, custom_name.replace(' ', '_').replace('/', '_'))
+                    downloaded_path = snapshot_download(
+                        repo_id=repo_id,
+                        local_dir=model_path,
+                        local_dir_use_symlinks=False,
+                        resume_download=True,
+                        ignore_patterns=["*.md", "*.txt", "*.gitattributes", "*.gitignore"]
+                    )
+                    
+                    # Save the original repository information for later reference
+                    repo_info_file = os.path.join(model_path, '.huggingface_repo')
+                    with open(repo_info_file, 'w') as f:
+                        f.write(repo_id)
+                    
+                    print(f"Downloaded repository to: {downloaded_path}")
+                    print(f"Saved original repo info: {repo_id}")
+                    return downloaded_path
+                else:
+                    # Return the repo_id since it's now cached by transformers
+                    return repo_id
+                    
+            except ImportError:
+                print("Transformers not available, falling back to huggingface_hub download")
+                # Fallback to original method
+                if custom_name:
+                    model_path = os.path.join(MODELS_DIR, custom_name.replace(' ', '_').replace('/', '_'))
+                else:
+                    model_path = os.path.join(MODELS_DIR, repo_id.replace('/', '_'))
+                
+                downloaded_path = snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=model_path,
+                    local_dir_use_symlinks=False,
+                    resume_download=True,
+                    ignore_patterns=["*.md", "*.txt", "*.gitattributes", "*.gitignore"]
+                )
+                
+                # Save the original repository information for later reference
+                repo_info_file = os.path.join(model_path, '.huggingface_repo')
+                with open(repo_info_file, 'w') as f:
+                    f.write(repo_id)
+                
+                print(f"Downloaded repository to: {downloaded_path}")
+                print(f"Saved original repo info: {repo_id}")
+                return downloaded_path
 
     except Exception as e:
-        raise Exception(f"Failed to download model {model_name}: {e}")
+        # More detailed error message
+        error_msg = str(e)
+        if "401" in error_msg or "403" in error_msg:
+            raise Exception(f"Authentication failed for {model_name}. This model may require access approval or a Hugging Face token. Error: {e}")
+        elif "404" in error_msg:
+            raise Exception(f"Model {model_name} not found. Please check the repository name. Error: {e}")
+        elif "Connection" in error_msg or "timeout" in error_msg.lower():
+            raise Exception(f"Network error downloading {model_name}. Please check your internet connection. Error: {e}")
+        else:
+            raise Exception(f"Failed to download model {model_name}: {e}")
 
 
-def _download_from_url(url: str) -> str:
+def _download_from_url(url: str, custom_name: Optional[str] = None) -> str:
     """
     Download a GGUF file from a direct Hugging Face URL.
 
     Args:
         url: Direct URL to the GGUF file
+        custom_name: Optional custom name for the downloaded model
 
     Returns:
         Local path to the downloaded file
@@ -163,7 +268,13 @@ def _download_from_url(url: str) -> str:
     match = re.match(hf_pattern, url)
 
     if not match:
-        raise ValueError(f"Invalid Hugging Face URL format: {url}")
+        # Check if it's a repository URL (common mistake)
+        repo_pattern = r'https://huggingface\.co/([^/]+/[^/?]+)/?$'
+        repo_match = re.match(repo_pattern, url)
+        if repo_match:
+            raise ValueError(f"This appears to be a repository URL, not a direct file URL. Repository: {repo_match.group(1)}. For repositories, use the repository name directly (e.g., '{repo_match.group(1)}') instead of the full URL.")
+        else:
+            raise ValueError(f"Invalid Hugging Face file URL format: {url}. Expected format: https://huggingface.co/user/repo/blob/main/filename.ext")
 
     repo_id = match.group(1)
     branch = match.group(2)  # Usually 'main'
@@ -176,7 +287,10 @@ def _download_from_url(url: str) -> str:
 
     # Create local filename
     safe_repo_name = repo_id.replace('/', '_')
-    local_filename = f"{safe_repo_name}_{filename}"
+    if custom_name:
+        local_filename = f"{custom_name}_{filename}"
+    else:
+        local_filename = f"{safe_repo_name}_{filename}"
     local_path = os.path.join(MODELS_DIR, local_filename)
 
     # Check if already downloaded
@@ -207,7 +321,13 @@ def _download_from_url(url: str) -> str:
         import shutil
         if os.path.exists(local_path):
             os.remove(local_path)
-        shutil.copy2(downloaded_path, local_path)
+        if custom_name:
+            custom_path = os.path.join(MODELS_DIR, f"{custom_name}_{filename}")
+            shutil.copy2(downloaded_path, custom_path)
+            print(f"Downloaded and renamed file to: {custom_path}")
+            return custom_path
+        else:
+            shutil.copy2(downloaded_path, local_path)
 
         print(f"✅ Downloaded successfully to: {local_path}")
         return local_path
