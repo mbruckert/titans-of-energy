@@ -267,30 +267,18 @@ def _download_zonos(model: str, cache_dir: Optional[str] = None, force_download:
         # Try to import zonos
         try:
             from zonos.model import Zonos
+            from zonos.conditioning import make_cond_dict
+            from zonos.utils import DEFAULT_DEVICE
         except ImportError:
-            print("Zonos not found. Attempting to install...")
-
-            # Try installing zonos (this might not work if it's not on PyPI)
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "zonos"],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-
-            if result.returncode != 0:
-                print(
-                    "Zonos installation via pip failed. You may need to install it manually.")
-                print(
-                    "Please check the Zonos documentation for installation instructions.")
-                return False
-
-            # Try importing again
-            try:
-                from zonos.model import Zonos
-            except ImportError:
-                print("Failed to import Zonos after installation")
-                return False
+            print("Zonos not found. Please install it manually.")
+            print("Installation instructions:")
+            print("1. Install system dependencies:")
+            print("   Ubuntu: sudo apt install -y espeak-ng")
+            print("   macOS: brew install espeak-ng")
+            print("2. Install Zonos from GitHub:")
+            print("   pip install git+https://github.com/Zyphra/Zonos.git")
+            print("   or clone and install: git clone https://github.com/Zyphra/Zonos.git && cd Zonos && pip install -e .")
+            return False
 
         # Check if espeak-ng is available (required for Zonos)
         try:
@@ -298,7 +286,7 @@ def _download_zonos(model: str, cache_dir: Optional[str] = None, force_download:
                            capture_output=True, check=True)
         except (FileNotFoundError, subprocess.CalledProcessError):
             print(
-                "Warning: espeak-ng not found. Zonos requires espeak-ng to be installed.")
+                "Error: espeak-ng not found. Zonos requires espeak-ng to be installed.")
             print(
                 "Install with: sudo apt install espeak-ng (Ubuntu/Debian) or brew install espeak-ng (macOS)")
             return False
@@ -311,9 +299,18 @@ def _download_zonos(model: str, cache_dir: Optional[str] = None, force_download:
             if cache_dir:
                 os.environ['HF_HOME'] = cache_dir
 
+            # Determine device
+            device = DEFAULT_DEVICE
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+
             # This will download the model if it doesn't exist
-            zonos_model = Zonos.from_pretrained(model)
-            print("Zonos model ready")
+            zonos_model = Zonos.from_pretrained(model, device=device)
+            print(f"Zonos model ready on device: {device}")
             return True
 
         except Exception as e:
@@ -372,6 +369,8 @@ def check_voice_model_availability() -> Dict[str, Dict[str, Any]]:
     # Check Zonos
     try:
         from zonos.model import Zonos
+        from zonos.conditioning import make_cond_dict
+        from zonos.utils import DEFAULT_DEVICE
         models["Zonos"]["available"] = True
         models["Zonos"]["dependencies"].append("zonos")
 
@@ -435,6 +434,8 @@ def check_single_model_availability(model: str) -> bool:
     elif model_lower == "zonos":
         try:
             from zonos.model import Zonos
+            from zonos.conditioning import make_cond_dict
+            from zonos.utils import DEFAULT_DEVICE
             return True
         except ImportError:
             return False

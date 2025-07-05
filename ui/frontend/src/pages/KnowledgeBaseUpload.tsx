@@ -1,8 +1,14 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
 import VectorModelSelector from '../components/VectorModelSelector';
 import { X } from 'lucide-react';
+import { 
+  getCharacterCreationData, 
+  saveCharacterCreationData, 
+  getCharacterCreationFiles, 
+  saveCharacterCreationFiles 
+} from '../utils/characterCreation';
 
 interface VectorConfig {
   model_type: 'openai' | 'sentence_transformers';
@@ -22,6 +28,22 @@ const KnowledgeBaseUpload = () => {
     config: { device: 'auto' }
   });
 
+  // Restore previous selections when component mounts
+  useEffect(() => {
+    const existingData = getCharacterCreationData();
+    
+    // Restore embedding configuration
+    if (existingData.knowledgeBaseEmbeddingConfig) {
+      setEmbeddingConfig(existingData.knowledgeBaseEmbeddingConfig);
+    }
+    
+    // Restore files from global storage
+    const files = getCharacterCreationFiles();
+    if (files.knowledgeBaseFiles) {
+      setFiles(files.knowledgeBaseFiles);
+    }
+  }, []);
+
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const droppedFiles = Array.from(e.dataTransfer.files);
@@ -37,33 +59,31 @@ const KnowledgeBaseUpload = () => {
     setFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
   };
 
-  const handleSubmit = () => {
-    // Initialize global file storage if it doesn't exist
-    if (!window.characterCreationFiles) {
-      window.characterCreationFiles = {};
-    }
-    
+  // Save current progress before navigating
+  const saveProgress = () => {
     // Store knowledge base files in global storage
     if (files.length > 0) {
-      window.characterCreationFiles.knowledgeBaseFiles = files;
+      saveCharacterCreationFiles({ knowledgeBaseFiles: files });
       console.log('Knowledge base files stored:', files.map(f => f.name));
     }
     
-    // Get existing character data from session storage
-    const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
-    
-    // Add knowledge base configuration (not the actual files)
-    const updatedData = {
-      ...existingData,
+    // Save knowledge base configuration
+    saveCharacterCreationData({
       hasKnowledgeBase: files.length > 0,
       knowledgeBaseFileCount: files.length,
       knowledgeBaseEmbeddingConfig: embeddingConfig
-    };
+    });
+  };
 
-    // Store updated data (without File objects)
-    sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
-    
+  const handleSubmit = () => {
+    saveProgress();
     navigate('/voice-cloning');
+  };
+
+  const handleBack = () => {
+    // Save current progress before going back
+    saveProgress();
+    navigate('/model-selection');
   };
 
   return (
@@ -134,7 +154,7 @@ const KnowledgeBaseUpload = () => {
 
       <div className="flex justify-between">
         <button
-          onClick={() => navigate('/model-selection')}
+          onClick={handleBack}
           className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
         >
           Back

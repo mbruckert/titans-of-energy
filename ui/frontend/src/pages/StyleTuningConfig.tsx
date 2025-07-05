@@ -1,9 +1,16 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
 import VectorModelSelector from '../components/VectorModelSelector';
 import { X } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+import { 
+  getCharacterCreationData, 
+  saveCharacterCreationData, 
+  getCharacterCreationFiles, 
+  saveCharacterCreationFiles,
+  clearCharacterCreationData 
+} from '../utils/characterCreation';
 
 interface VectorConfig {
   model_type: 'openai' | 'sentence_transformers';
@@ -36,6 +43,22 @@ const StyleTuningConfig = () => {
     model_name: 'all-MiniLM-L6-v2',
     config: { device: 'auto' }
   });
+
+  // Restore previous selections when component mounts
+  useEffect(() => {
+    const existingData = getCharacterCreationData();
+    
+    // Restore embedding configuration
+    if (existingData.styleTuningEmbeddingConfig) {
+      setEmbeddingConfig(existingData.styleTuningEmbeddingConfig);
+    }
+    
+    // Restore files from global storage
+    const files = getCharacterCreationFiles();
+    if (files.styleTuningFiles) {
+      setFiles(files.styleTuningFiles);
+    }
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -153,15 +176,15 @@ const StyleTuningConfig = () => {
     setError(null);
 
     try {
-      // Get all character data from session storage
-      const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+      // Get all character data from utility
+      const characterData = getCharacterCreationData();
       
       if (!characterData.name) {
         throw new Error('Character name is missing');
       }
 
       // Get files from global storage
-      const storedFiles = window.characterCreationFiles || {};
+      const storedFiles = getCharacterCreationFiles();
 
       // Create FormData for multipart upload
       const formData = new FormData();
@@ -249,9 +272,8 @@ const StyleTuningConfig = () => {
 
       if (result.status === 'success') {
         console.log('🎉 Character created successfully!');
-        // Clear session storage and global file storage
-        sessionStorage.removeItem('newCharacterData');
-        window.characterCreationFiles = {};
+        // Clear all character creation data
+        clearCharacterCreationData();
         
         // Navigate back to character selection
         navigate('/character-selection');
@@ -275,33 +297,32 @@ const StyleTuningConfig = () => {
     }
   };
 
-  const handleSubmit = () => {
-    // Initialize global file storage if it doesn't exist
-    if (!window.characterCreationFiles) {
-      window.characterCreationFiles = {};
-    }
-    
+  // Save current progress before navigating
+  const saveProgress = () => {
     // Store style tuning files in global storage
     if (files.length > 0) {
-      window.characterCreationFiles.styleTuningFiles = files;
+      saveCharacterCreationFiles({ styleTuningFiles: files });
       console.log('Style tuning files stored:', files.map(f => f.name));
     }
     
-    // Get existing character data from session storage
-    const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
-    
-    // Add style tuning configuration (not the actual files)
-    const updatedData = {
-      ...existingData,
+    // Save style tuning configuration
+    saveCharacterCreationData({
       hasStyleTuning: files.length > 0,
-      styleTuningFileCount: files.length
-    };
+      styleTuningFileCount: files.length,
+      styleTuningEmbeddingConfig: embeddingConfig
+    });
+  };
 
-    // Store updated data (without File objects)
-    sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
-    
+  const handleSubmit = () => {
+    saveProgress();
     // Create the character now (no more steps)
     createCharacter();
+  };
+
+  const handleBack = () => {
+    // Save current progress before going back
+    saveProgress();
+    navigate('/voice-cloning');
   };
 
   return (
@@ -397,7 +418,7 @@ const StyleTuningConfig = () => {
 
       <div className="flex justify-between">
         <button
-          onClick={() => navigate('/voice-cloning')}
+          onClick={handleBack}
           className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
           disabled={isCreating}
         >

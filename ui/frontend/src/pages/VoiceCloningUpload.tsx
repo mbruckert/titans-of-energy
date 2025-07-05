@@ -1,8 +1,15 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
 import { X, GripVertical } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+import { 
+  getCharacterCreationData, 
+  saveCharacterCreationData, 
+  getCharacterCreationFiles, 
+  saveCharacterCreationFiles,
+  clearCharacterCreationData 
+} from '../utils/characterCreation';
 
 // Global file storage for the character creation flow
 declare global {
@@ -25,6 +32,91 @@ const VoiceCloningUpload = () => {
   const [error, setError] = useState<string | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribingFileIndex, setTranscribingFileIndex] = useState<number | null>(null);
+
+  // Restore previous selections when component mounts
+  useEffect(() => {
+    const existingData = getCharacterCreationData();
+    
+    // Restore voice cloning settings
+    if (existingData.voice_cloning_settings) {
+      const settings = existingData.voice_cloning_settings;
+      if (settings.model) {
+        setSelectedModel(settings.model);
+      }
+      if (settings.ref_text) {
+        setReferenceText(settings.ref_text);
+      }
+      
+      // Restore preprocessing config
+      if (settings.preprocess_audio !== undefined) {
+        setPreprocessingConfig(prev => ({
+          ...prev,
+          preprocess_audio: settings.preprocess_audio,
+          clean_audio: settings.clean_audio !== undefined ? settings.clean_audio : prev.clean_audio,
+          remove_silence: settings.remove_silence !== undefined ? settings.remove_silence : prev.remove_silence,
+          enhance_audio: settings.enhance_audio !== undefined ? settings.enhance_audio : prev.enhance_audio,
+          skip_all_processing: settings.skip_all_processing !== undefined ? settings.skip_all_processing : prev.skip_all_processing,
+          preprocessing_order: settings.preprocessing_order || prev.preprocessing_order,
+          top_db: settings.top_db !== undefined ? settings.top_db : prev.top_db,
+          fade_length_ms: settings.fade_length_ms !== undefined ? settings.fade_length_ms : prev.fade_length_ms,
+          bass_boost: settings.bass_boost !== undefined ? settings.bass_boost : prev.bass_boost,
+          treble_boost: settings.treble_boost !== undefined ? settings.treble_boost : prev.treble_boost,
+          compression: settings.compression !== undefined ? settings.compression : prev.compression
+        }));
+      }
+      
+      // Restore F5 settings and modifications
+      if (settings.f5_settings) {
+        setF5Settings(settings.f5_settings);
+      }
+      if (settings.f5_settings_modified) {
+        setF5SettingsModified(new Set(settings.f5_settings_modified));
+      }
+      
+      // Restore XTTS settings and modifications
+      if (settings.xtts_settings) {
+        setXttsSettings(settings.xtts_settings);
+      }
+      if (settings.xtts_settings_modified) {
+        setXttsSettingsModified(new Set(settings.xtts_settings_modified));
+      }
+      
+      // Restore Zonos settings and modifications
+      if (settings.zonos_settings) {
+        setZonosSettings(settings.zonos_settings);
+      }
+      if (settings.zonos_settings_modified) {
+        setZonosSettingsModified(new Set(settings.zonos_settings_modified));
+      }
+      
+      // Fallback: Restore model-specific settings from direct properties (backward compatibility)
+      if (!settings.xtts_settings && settings.model === 'xtts') {
+        const xttsKeys = ['language', 'repetition_penalty', 'top_k', 'top_p', 'speed', 'enable_text_splitting'];
+        xttsKeys.forEach(key => {
+          if (settings[key] !== undefined) {
+            setXttsSettings(prev => ({ ...prev, [key]: settings[key] }));
+            setXttsSettingsModified(prev => new Set([...prev, key]));
+          }
+        });
+      }
+      
+      if (!settings.zonos_settings && settings.model === 'zonos') {
+        const zonosKeys = ['language', 'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8'];
+        zonosKeys.forEach(key => {
+          if (settings[key] !== undefined) {
+            setZonosSettings(prev => ({ ...prev, [key]: settings[key] }));
+            setZonosSettingsModified(prev => new Set([...prev, key]));
+          }
+        });
+      }
+    }
+    
+    // Restore files from global storage
+    const files = getCharacterCreationFiles();
+    if (files.voiceCloningFiles) {
+      setFiles(files.voiceCloningFiles);
+    }
+  }, []);
   
   // Preprocessing configuration state
   const [preprocessingConfig, setPreprocessingConfig] = useState({
@@ -41,10 +133,9 @@ const VoiceCloningUpload = () => {
     compression: true
   });
 
-  // Model-specific settings
-  const [f5Settings, setF5Settings] = useState({
-    // F5-specific settings (remove_silence is handled by preprocessingConfig)
-  });
+  // Model-specific settings with tracking of user modifications
+  const [f5Settings, setF5Settings] = useState({});
+  const [f5SettingsModified, setF5SettingsModified] = useState(new Set<string>());
 
   const [xttsSettings, setXttsSettings] = useState({
     language: 'en',
@@ -54,6 +145,7 @@ const VoiceCloningUpload = () => {
     speed: 1.0,
     enable_text_splitting: true
   });
+  const [xttsSettingsModified, setXttsSettingsModified] = useState(new Set<string>());
 
   const [zonosSettings, setZonosSettings] = useState({
     e1: 0.5, // happiness
@@ -71,6 +163,7 @@ const VoiceCloningUpload = () => {
     pitch_standard_deviation: 100,
     language: 'en'
   });
+  const [zonosSettingsModified, setZonosSettingsModified] = useState(new Set<string>());
 
   // Drag and drop state for reordering
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -78,7 +171,7 @@ const VoiceCloningUpload = () => {
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS', description: 'High quality, fast inference' },
     { id: 'xtts', name: 'XTTS-v2', description: 'Multilingual support' },
-    { id: 'zonosv0.1', name: 'Zonos-v0.1', description: 'Early experimental TTS model' },
+    { id: 'zonos', name: 'Zonos-v0.1', description: 'Early experimental TTS model' },
   ];
 
   const processingSteps = [
@@ -199,6 +292,7 @@ const VoiceCloningUpload = () => {
       ...prev,
       [key]: value
     }));
+    setF5SettingsModified(prev => new Set([...prev, key]));
   };
 
   const handleXttsSettingChange = (key: string, value: any) => {
@@ -206,6 +300,7 @@ const VoiceCloningUpload = () => {
       ...prev,
       [key]: value
     }));
+    setXttsSettingsModified(prev => new Set([...prev, key]));
   };
 
   const handleZonosSettingChange = (key: string, value: any) => {
@@ -213,6 +308,7 @@ const VoiceCloningUpload = () => {
       ...prev,
       [key]: value
     }));
+    setZonosSettingsModified(prev => new Set([...prev, key]));
   };
 
   // Drag and drop handlers for reordering
@@ -257,6 +353,17 @@ const VoiceCloningUpload = () => {
 
   const getStepInfo = (stepId: string) => {
     return processingSteps.find(step => step.id === stepId);
+  };
+
+  // Function to filter settings to only include modified values
+  const getModifiedSettings = (settings: any, modifiedKeys: Set<string>) => {
+    const filtered: any = {};
+    for (const key of modifiedKeys) {
+      if (settings[key] !== undefined) {
+        filtered[key] = settings[key];
+      }
+    }
+    return filtered;
   };
 
   const transcribeAudio = async (fileIndex: number) => {
@@ -306,15 +413,15 @@ const VoiceCloningUpload = () => {
     setError(null);
 
     try {
-      // Get all character data from session storage
-      const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+      // Get all character data from utility
+      const characterData = getCharacterCreationData();
       
       if (!characterData.name) {
         throw new Error('Character name is missing');
       }
 
       // Get files from global storage
-      const storedFiles = window.characterCreationFiles || {};
+      const storedFiles = getCharacterCreationFiles();
 
       // Create FormData for multipart upload
       const formData = new FormData();
@@ -339,10 +446,17 @@ const VoiceCloningUpload = () => {
         ref_audio: files.length > 0 ? files[0] : null,
         ref_text: referenceText || 'Hello, how can I help you today?',
         ...preprocessingConfig,
-        // Model-specific settings
-        ...(selectedModel === 'f5tts' && f5Settings),
-        ...(selectedModel === 'xtts' && xttsSettings),
-        ...(selectedModel === 'zonosv0.1' && zonosSettings)
+        // Always include all model-specific settings and their modification state
+        f5_settings: f5Settings,
+        f5_settings_modified: Array.from(f5SettingsModified),
+        xtts_settings: xttsSettings,
+        xtts_settings_modified: Array.from(xttsSettingsModified),
+        zonos_settings: zonosSettings,
+        zonos_settings_modified: Array.from(zonosSettingsModified),
+        // Also include the filtered settings for the current model
+        ...(selectedModel === 'f5tts' && getModifiedSettings(f5Settings, f5SettingsModified)),
+        ...(selectedModel === 'xtts' && getModifiedSettings(xttsSettings, xttsSettingsModified)),
+        ...(selectedModel === 'zonos' && getModifiedSettings(zonosSettings, zonosSettingsModified))
       };
       
       formData.append('voice_cloning_settings', JSON.stringify(voiceSettings));
@@ -383,9 +497,8 @@ const VoiceCloningUpload = () => {
       const result = await response.json();
 
       if (result.status === 'success') {
-        // Clear session storage and global file storage
-        sessionStorage.removeItem('newCharacterData');
-        window.characterCreationFiles = {};
+        // Clear all character creation data
+        clearCharacterCreationData();
         
         // Navigate back to character selection
         navigate('/character-selection');
@@ -400,45 +513,49 @@ const VoiceCloningUpload = () => {
     }
   };
 
-  const handleSubmit = () => {
-    // Initialize global file storage if it doesn't exist
-    if (!window.characterCreationFiles) {
-      window.characterCreationFiles = {};
-    }
-    
+  // Save current progress before navigating
+  const saveProgress = () => {
     // Store voice cloning files in global storage
     if (files.length > 0) {
-      window.characterCreationFiles.voiceCloningFiles = files;
+      saveCharacterCreationFiles({ voiceCloningFiles: files });
       console.log('Voice cloning files stored:', files.map(f => f.name));
       console.log('Reference text:', referenceText);
     }
     
-    // Get existing character data from session storage
-    const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
-    
-    // Add voice cloning configuration with preprocessing
+    // Save comprehensive voice cloning configuration
     const voiceSettings = {
       model: selectedModel,
       ref_text: referenceText || 'Hello, how can I help you today?',
       ...preprocessingConfig,
-      // Model-specific settings
-      ...(selectedModel === 'f5tts' && f5Settings),
-      ...(selectedModel === 'xtts' && xttsSettings),
-      ...(selectedModel === 'zonosv0.1' && zonosSettings)
+      // Always save all model-specific settings and their modification state
+      f5_settings: f5Settings,
+      f5_settings_modified: Array.from(f5SettingsModified),
+      xtts_settings: xttsSettings,
+      xtts_settings_modified: Array.from(xttsSettingsModified),
+      zonos_settings: zonosSettings,
+      zonos_settings_modified: Array.from(zonosSettingsModified),
+      // Also include the filtered settings for backward compatibility
+      ...(selectedModel === 'f5tts' && getModifiedSettings(f5Settings, f5SettingsModified)),
+      ...(selectedModel === 'xtts' && getModifiedSettings(xttsSettings, xttsSettingsModified)),
+              ...(selectedModel === 'zonos' && getModifiedSettings(zonosSettings, zonosSettingsModified))
     };
 
-    const updatedData = {
-      ...existingData,
+    saveCharacterCreationData({
       hasVoiceCloning: files.length > 0,
       voiceCloningFileCount: files.length,
       voice_cloning_settings: voiceSettings
-    };
+    });
+  };
 
-    // Store updated data (without File objects)
-    sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
-    
-    // Navigate to style tuning (skip TTS config since it's now integrated)
+  const handleSubmit = () => {
+    saveProgress();
     navigate('/style-tuning');
+  };
+
+  const handleBack = () => {
+    // Save current progress before going back
+    saveProgress();
+    navigate('/knowledge-base');
   };
 
   const handleCreateCharacter = () => {
@@ -596,8 +713,6 @@ const VoiceCloningUpload = () => {
           </div>
         </div>
       )}
-
-
 
       {/* Audio Preprocessing Configuration */}
       {files.length > 0 && (
@@ -798,6 +913,43 @@ const VoiceCloningUpload = () => {
       {files.length > 0 && (
         <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">{selectedModel.toUpperCase()} Model Settings</h3>
+          <div className="flex justify-between items-center mb-4">
+            <p className="text-sm text-gray-600">
+              Only settings that you modify from their defaults will be included in the configuration. 
+              This helps keep the configuration clean and efficient.
+            </p>
+            <button
+              onClick={() => {
+                setXttsSettingsModified(new Set());
+                setZonosSettingsModified(new Set());
+                setF5SettingsModified(new Set());
+              }}
+              className="text-xs text-gray-500 hover:text-gray-700 underline"
+            >
+              Reset modifications
+            </button>
+          </div>
+          
+          {/* Debug: Show what settings will be sent */}
+          {false && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+              <h4 className="text-sm font-medium text-blue-900 mb-2">Debug: Settings to be sent</h4>
+              <div className="text-xs text-blue-700 space-y-1">
+                {selectedModel === 'f5tts' && (
+                  <div>F5 Settings: {Object.keys(getModifiedSettings(f5Settings, f5SettingsModified)).length > 0 ? 
+                    JSON.stringify(getModifiedSettings(f5Settings, f5SettingsModified)) : 'None (using defaults)'}</div>
+                )}
+                {selectedModel === 'xtts' && (
+                  <div>XTTS Settings: {Object.keys(getModifiedSettings(xttsSettings, xttsSettingsModified)).length > 0 ? 
+                    JSON.stringify(getModifiedSettings(xttsSettings, xttsSettingsModified)) : 'None (using defaults)'}</div>
+                )}
+                {selectedModel === 'zonos' && (
+                  <div>Zonos Settings: {Object.keys(getModifiedSettings(zonosSettings, zonosSettingsModified)).length > 0 ? 
+                    JSON.stringify(getModifiedSettings(zonosSettings, zonosSettingsModified)) : 'None (using defaults)'}</div>
+                )}
+              </div>
+            </div>
+          )}
           
           {/* F5-TTS Settings */}
           {selectedModel === 'f5tts' && (
@@ -816,7 +968,12 @@ const VoiceCloningUpload = () => {
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Language
+                    {xttsSettingsModified.has('language') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </label>
                   <select
                     value={xttsSettings.language}
                     onChange={(e) => handleXttsSettingChange('language', e.target.value)}
@@ -842,7 +999,12 @@ const VoiceCloningUpload = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Repetition Penalty (0-10)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Repetition Penalty (0-10)
+                    {xttsSettingsModified.has('repetition_penalty') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </label>
                   <input
                     type="number"
                     value={xttsSettings.repetition_penalty}
@@ -855,7 +1017,12 @@ const VoiceCloningUpload = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Top K (0-100)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Top K (0-100)
+                    {xttsSettingsModified.has('top_k') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </label>
                   <input
                     type="number"
                     value={xttsSettings.top_k}
@@ -868,7 +1035,12 @@ const VoiceCloningUpload = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Top P (0-1)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Top P (0-1)
+                    {xttsSettingsModified.has('top_p') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </label>
                   <input
                     type="number"
                     value={xttsSettings.top_p}
@@ -881,7 +1053,12 @@ const VoiceCloningUpload = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Speed (0-1)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Speed (0-1)
+                    {xttsSettingsModified.has('speed') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </label>
                   <input
                     type="number"
                     value={xttsSettings.speed}
@@ -902,14 +1079,19 @@ const VoiceCloningUpload = () => {
                     onChange={(e) => handleXttsSettingChange('enable_text_splitting', e.target.checked)}
                     className="rounded border-gray-300 text-black focus:ring-black"
                   />
-                  <span className="ml-2 text-sm font-medium text-gray-700">Enable text splitting</span>
+                  <span className="ml-2 text-sm font-medium text-gray-700">
+                    Enable text splitting
+                    {xttsSettingsModified.has('enable_text_splitting') && (
+                      <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                    )}
+                  </span>
                 </label>
               </div>
             </div>
           )}
 
           {/* Zonos Settings */}
-          {selectedModel === 'zonosv0.1' && (
+          {selectedModel === 'zonos' && (
             <div className="space-y-4">
               <p className="text-sm text-gray-600 mb-4">Zonos-v0.1 specific configuration options</p>
               
@@ -1128,7 +1310,7 @@ const VoiceCloningUpload = () => {
 
       <div className="flex justify-between">
         <button
-          onClick={() => navigate('/knowledge-base')}
+          onClick={handleBack}
           className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
           disabled={isCreating}
         >

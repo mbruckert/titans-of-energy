@@ -19,6 +19,7 @@ import shutil
 from typing import Dict, Any, Optional
 import time
 import torch
+import subprocess
 
 # Import library modules
 import sys
@@ -105,6 +106,270 @@ if HUGGINGFACE_API_KEY:
         print(f"⚠ Warning: Failed to authenticate with Hugging Face: {e}")
 else:
     print("ℹ No Hugging Face API key found. Public models will still work.")
+
+
+def setup_zonos_environment():
+    """
+    Automatically setup the Zonos conda environment if it doesn't exist.
+    This ensures no manual setup is required for Zonos TTS functionality.
+    """
+    print("\n" + "="*60)
+    print("🔧 ZONOS ENVIRONMENT SETUP")
+    print("="*60)
+    
+    try:
+        # Get conda base path - need to find the actual conda installation, not the current env
+        conda_base = None
+        
+        # First try to get conda base from CONDA_EXE environment variable
+        conda_exe = os.environ.get('CONDA_EXE')
+        if conda_exe and os.path.exists(conda_exe):
+            # Extract base path from conda executable
+            conda_base = os.path.dirname(os.path.dirname(conda_exe))
+        
+        # If that doesn't work, try to find conda in common locations
+        if not conda_base:
+            possible_conda_paths = [
+                '/opt/miniconda3',
+                '/opt/anaconda3',
+                '/usr/local/miniconda3',
+                '/usr/local/anaconda3',
+                os.path.expanduser('~/miniconda3'),
+                os.path.expanduser('~/anaconda3')
+            ]
+            
+            for path in possible_conda_paths:
+                if os.path.exists(os.path.join(path, 'bin', 'conda')):
+                    conda_base = path
+                    break
+        
+        # Last resort: try to get from current CONDA_PREFIX by going up directories
+        if not conda_base:
+            current_prefix = os.environ.get('CONDA_PREFIX')
+            if current_prefix:
+                # Check if we're in a conda environment (has /envs/ in path)
+                if '/envs/' in current_prefix:
+                    # Extract base conda path (everything before /envs/)
+                    potential_base = current_prefix.split('/envs/')[0]
+                    if os.path.exists(os.path.join(potential_base, 'bin', 'conda')):
+                        conda_base = potential_base
+                else:
+                    # We might be in the base environment
+                    if os.path.exists(os.path.join(current_prefix, 'bin', 'conda')):
+                        conda_base = current_prefix
+        
+        if not conda_base:
+            print("⚠️  Warning: Could not find conda installation")
+            print("   Zonos TTS will not be available")
+            print("   Please install conda/miniconda to use Zonos")
+            return False
+        
+        conda_env_name = "tts_zonos"
+        conda_env_path = os.path.join(conda_base, 'envs', conda_env_name)
+        conda_executable = os.path.join(conda_base, 'bin', 'conda')
+        zonos_env_python = os.path.join(conda_env_path, 'bin', 'python')
+        
+        print(f"📍 Conda base: {conda_base}")
+        print(f"📍 Target environment: {conda_env_path}")
+        
+        # Check if environment already exists
+        if os.path.exists(zonos_env_python):
+            print("✓ Zonos conda environment already exists")
+            
+            # Verify Zonos installation
+            try:
+                result = subprocess.run([
+                    zonos_env_python, '-c', 
+                    'import zonos.model; import torch; import torchaudio; print("OK")'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and "OK" in result.stdout:
+                    print("✓ Zonos dependencies verified")
+                    print("🎯 Zonos environment ready!")
+                    return True
+                else:
+                    print("⚠️  Zonos dependencies missing, reinstalling...")
+            except subprocess.TimeoutExpired:
+                print("⚠️  Zonos verification timed out, reinstalling...")
+            except Exception as e:
+                print(f"⚠️  Zonos verification failed: {e}, reinstalling...")
+        else:
+            print("📦 Creating new Zonos conda environment...")
+            
+        # If we get here, either the environment doesn't exist or verification failed
+        # Check if environment directory exists but is broken
+        if os.path.exists(conda_env_path):
+            print("🗑️  Removing existing broken environment...")
+            try:
+                subprocess.run([
+                    conda_executable, 'env', 'remove', '-n', conda_env_name, '-y'
+                ], capture_output=True, text=True, timeout=120)
+            except:
+                # If conda remove fails, try manual removal
+                try:
+                    shutil.rmtree(conda_env_path)
+                except:
+                    pass
+        
+        # Create new environment
+        print("🔄 Setting up Zonos conda environment...")
+        print("   This may take a few minutes on first run...")
+        print("📦 Creating conda environment with Python 3.10...")
+        result = subprocess.run([
+            conda_executable, 'create', '-n', conda_env_name, 'python=3.10', '-y'
+        ], capture_output=True, text=True, timeout=300)
+        
+        if result.returncode != 0:
+            print(f"❌ Failed to create conda environment: {result.stderr}")
+            return False
+        
+        print("✓ Conda environment created successfully")
+        
+        # Install required packages
+        print("📦 Installing PyTorch and dependencies...")
+        
+        # Determine the appropriate PyTorch installation command based on system
+        if DEVICE_OPTIMIZATION_AVAILABLE:
+            device_type, device_info = get_device_info()
+            if device_type == DeviceType.APPLE_SILICON:
+                # Apple Silicon - use conda-forge for better compatibility
+                torch_cmd = [
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'conda-forge',
+                    'pytorch', 'torchaudio', 'numpy', 'soundfile', '-y'
+                ]
+            elif device_type == DeviceType.NVIDIA_GPU:
+                # NVIDIA GPU - use PyTorch with CUDA
+                torch_cmd = [
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch', '-c', 'nvidia',
+                    'pytorch', 'torchaudio', 'pytorch-cuda=11.8', '-y'
+                ]
+            else:
+                # CPU only
+                torch_cmd = [
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch',
+                    'pytorch', 'torchaudio', 'cpuonly', '-y'
+                ]
+        else:
+            # Default installation
+            torch_cmd = [
+                conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch',
+                'pytorch', 'torchaudio', '-y'
+            ]
+        
+        result = subprocess.run(torch_cmd, capture_output=True, text=True, timeout=600)
+        
+        if result.returncode != 0:
+            print(f"❌ Failed to install PyTorch: {result.stderr}")
+            return False
+        
+        print("✓ PyTorch installed successfully")
+        
+        # Install additional dependencies via pip
+        print("📦 Installing additional dependencies...")
+        pip_packages = [
+            'soundfile',
+            'numpy',
+            'librosa'
+        ]
+        
+        for package in pip_packages:
+            try:
+                result = subprocess.run([
+                    zonos_env_python, '-m', 'pip', 'install', package
+                ], capture_output=True, text=True, timeout=120)
+                
+                if result.returncode == 0:
+                    print(f"✓ Installed {package}")
+                else:
+                    print(f"⚠️  Warning: Failed to install {package} via pip")
+            except subprocess.TimeoutExpired:
+                print(f"⚠️  Warning: Timeout installing {package}")
+            except Exception as e:
+                print(f"⚠️  Warning: Error installing {package}: {e}")
+        
+        # Install Zonos from GitHub
+        print("📦 Installing Zonos from GitHub...")
+        result = subprocess.run([
+            zonos_env_python, '-m', 'pip', 'install', 
+            'git+https://github.com/Zyphra/Zonos.git'
+        ], capture_output=True, text=True, timeout=300)
+        
+        if result.returncode != 0:
+            print(f"❌ Failed to install Zonos: {result.stderr}")
+            print("🔄 Trying alternative installation method...")
+            
+            # Try cloning and installing manually
+            try:
+                import tempfile
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    clone_result = subprocess.run([
+                        'git', 'clone', 'https://github.com/Zyphra/Zonos.git', 
+                        os.path.join(temp_dir, 'Zonos')
+                    ], capture_output=True, text=True, timeout=120)
+                    
+                    if clone_result.returncode == 0:
+                        install_result = subprocess.run([
+                            zonos_env_python, '-m', 'pip', 'install', '-e', 
+                            os.path.join(temp_dir, 'Zonos')
+                        ], capture_output=True, text=True, timeout=300)
+                        
+                        if install_result.returncode != 0:
+                            print(f"❌ Alternative installation also failed: {install_result.stderr}")
+                            return False
+                    else:
+                        print(f"❌ Failed to clone Zonos repository: {clone_result.stderr}")
+                        return False
+            except Exception as e:
+                print(f"❌ Alternative installation failed: {e}")
+                return False
+        
+        print("✓ Zonos installed successfully")
+        
+        # Verify installation
+        print("🔍 Verifying Zonos installation...")
+        try:
+            result = subprocess.run([
+                zonos_env_python, '-c', 
+                'import zonos.model; import torch; import torchaudio; print("Zonos installation verified")'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                print("✓ Zonos installation verified successfully")
+                print("🎯 Zonos environment setup complete!")
+                
+                # Check for espeak-ng system installation
+                espeak_check = subprocess.run(['which', 'espeak-ng'], capture_output=True, text=True)
+                if espeak_check.returncode == 0:
+                    print(f"✓ espeak-ng found at: {espeak_check.stdout.strip()}")
+                else:
+                    print("⚠️  espeak-ng not found in system PATH")
+                    print("   Please install it with: brew install espeak-ng (macOS)")
+                    print("   Zonos will attempt to locate it automatically")
+                
+                return True
+            else:
+                print(f"❌ Zonos verification failed: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("❌ Zonos verification timed out")
+            return False
+        except Exception as e:
+            print(f"❌ Zonos verification error: {e}")
+            return False
+    
+    except Exception as e:
+        print(f"❌ Zonos environment setup failed: {e}")
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
+        return False
+    
+    finally:
+        print("="*60)
+
+
+# Setup Zonos environment on startup
+setup_zonos_environment()
 
 # Database configuration
 
@@ -1547,6 +1812,14 @@ def ask_question_text():
                     print(
                         "Warning: No reference text found for character, using fallback")
 
+                print(f"🎤 API TTS Request for Character '{character_name}':")
+                print(f"   • TTS Model: {tts_model}")
+                print(f"   • Reference Audio: {character['voice_cloning_audio_path']}")
+                print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+                print(f"   • Generation Text: {styled_response[:100]}{'...' if len(styled_response) > 100 else ''}")
+                print(f"   • Voice Settings: {voice_settings}")
+                print(f"   • Use Realtime: {use_realtime}")
+
                 if use_realtime:
                     # Use real-time optimized generation for M4 Max and high-end hardware
                     from libraries.tts.inference import generate_realtime_audio_base64
@@ -1562,6 +1835,7 @@ def ask_question_text():
                 else:
                     # Generate audio as base64 with optimized performance
                     from libraries.tts.inference import generate_cloned_audio_base64
+                    print("🎵 Using standard optimized TTS generation")
                     
                     audio_base64 = generate_cloned_audio_base64(
                         model=tts_model,
@@ -1829,6 +2103,14 @@ def ask_question_audio():
                     print(
                         "Warning: No reference text found for character, using fallback")
 
+                print(f"🎤 API Audio TTS Request for Character '{character_name}':")
+                print(f"   • TTS Model: {tts_model}")
+                print(f"   • Reference Audio: {character['voice_cloning_audio_path']}")
+                print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+                print(f"   • Generation Text: {styled_response[:100]}{'...' if len(styled_response) > 100 else ''}")
+                print(f"   • Voice Settings: {voice_settings}")
+                print(f"   • Use Realtime: {use_realtime}")
+
                 if use_realtime:
                     # Use real-time optimized generation for M4 Max and high-end hardware
                     from libraries.tts.inference import generate_realtime_audio_base64
@@ -1844,6 +2126,7 @@ def ask_question_audio():
                 else:
                     # Generate audio as base64 with optimized performance
                     from libraries.tts.inference import generate_cloned_audio_base64
+                    print("🎵 Using standard optimized TTS generation")
                     
                     audio_base64 = generate_cloned_audio_base64(
                         model=tts_model,

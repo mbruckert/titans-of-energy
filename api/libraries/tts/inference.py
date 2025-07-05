@@ -15,6 +15,7 @@ import sys
 import subprocess
 import tempfile
 import time
+import json
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 import torch
@@ -59,6 +60,16 @@ _mixed_precision_enabled = False
 
 # Model-specific optimization flags
 _xtts_mixed_precision_enabled = False  # XTTS has numerical issues with FP16
+
+# Global variables for model caching and performance tracking
+_f5tts_load_time = None
+_xtts_load_time = None
+_f5tts_memory_usage = None
+_xtts_memory_usage = None
+
+# Zonos persistent worker management
+_zonos_workers = {}  # Dictionary to store persistent workers by character/model
+_zonos_worker_lock = None
 
 
 def _get_device_optimization():
@@ -432,6 +443,15 @@ def generate_audio(
     Returns:
         Path to generated audio file
     """
+    print(f"🎵 TTS Audio Generation Request:")
+    print(f"   • Model: {model}")
+    print(f"   • Reference Audio: {ref_audio}")
+    print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+    print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+    print(f"   • Auto Download: {auto_download}")
+    print(f"   • Fast Mode: {fast_mode}")
+    print(f"   • Input Config: {config}")
+    
     if not os.path.exists(ref_audio):
         raise FileNotFoundError(f"Reference audio file not found: {ref_audio}")
 
@@ -488,6 +508,15 @@ def generate_audio(
         default_config.update(config)
     config = default_config
 
+    print(f"🔧 Final TTS Configuration:")
+    for key, value in config.items():
+        if key in ['ref_text', 'gen_text']:
+            # Truncate long text for readability
+            display_value = value[:100] + '...' if len(str(value)) > 100 else value
+            print(f"   • {key}: {display_value}")
+        else:
+            print(f"   • {key}: {value}")
+
     # Check if model is already loaded, otherwise ensure it's available
     model_lower = model.lower()
     model_already_loaded = False
@@ -514,6 +543,8 @@ def generate_audio(
     # Generate timestamp-based output filename
     timestamp = int(time.time())
     output_file = output_dir / f"generated_audio_{timestamp}.wav"
+
+    print(f"🎯 Routing to model implementation: {model_lower}")
 
     # Route to appropriate model implementation
     result_file = None
@@ -597,6 +628,13 @@ def _generate_f5tts(
 ) -> str:
     """Generate audio using F5-TTS API with comprehensive hardware optimization."""
     try:
+        print(f"🎤 F5-TTS Generation Parameters:")
+        print(f"   • Reference Audio: {ref_audio}")
+        print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+        print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+        print(f"   • Output File: {output_file}")
+        print(f"   • Config: {config}")
+        
         print(f"Generating F5TTS audio for text: {gen_text[:100]}...")
         print(f"Using reference: {ref_audio}")
         print(f"Reference text: {ref_text[:100]}...")
@@ -656,15 +694,26 @@ def _generate_f5tts(
                 'speed': 1.0,  # Slightly faster playback for speed
             })
 
+        print(f"🎯 F5-TTS Final Generation Parameters:")
+        for key, value in generation_params.items():
+            if key in ['ref_text', 'gen_text']:
+                # Truncate long text for readability
+                display_value = value[:100] + '...' if len(str(value)) > 100 else value
+                print(f"   • {key}: {display_value}")
+            else:
+                print(f"   • {key}: {value}")
+
         # Use device-specific optimizations with retry logic for tensor mismatches
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
                 if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
+                    print(f"🎯 Using NVIDIA GPU with mixed precision for F5-TTS")
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
                         wav, sr, spec = f5tts_model.infer(**generation_params)
                 elif device_type == DeviceType.APPLE_SILICON and _mps_available:
                     # Use MPS optimizations for Apple Silicon
+                    print(f"🍎 Using Apple Silicon MPS optimization for F5-TTS")
                     with torch.inference_mode():  # Use inference mode for better MPS performance
                         try:
                             wav, sr, spec = f5tts_model.infer(**generation_params)
@@ -683,6 +732,7 @@ def _generate_f5tts(
                             else:
                                 raise mps_error
                 else:
+                    print(f"💻 Using CPU/default device for F5-TTS")
                     wav, sr, spec = f5tts_model.infer(**generation_params)
                 break  # Success, exit retry loop
             except Exception as e:
@@ -730,6 +780,13 @@ def _generate_xtts(
 ) -> str:
     """Generate audio using XTTS-v2 API with comprehensive hardware optimization."""
     try:
+        print(f"🎤 XTTS-v2 Generation Parameters:")
+        print(f"   • Reference Audio: {ref_audio}")
+        print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+        print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+        print(f"   • Output File: {output_file}")
+        print(f"   • Config: {config}")
+        
         print(f"Generating XTTS audio for text: {gen_text[:100]}...")
         print(f"Using reference: {ref_audio}")
 
@@ -759,13 +816,24 @@ def _generate_xtts(
         if 'enable_text_splitting' in config:
             generation_params['enable_text_splitting'] = config['enable_text_splitting']
 
+        print(f"🎯 XTTS-v2 Final Generation Parameters:")
+        for key, value in generation_params.items():
+            if key == 'text':
+                # Truncate long text for readability
+                display_value = value[:100] + '...' if len(str(value)) > 100 else value
+                print(f"   • {key}: {display_value}")
+            else:
+                print(f"   • {key}: {value}")
+
         # Use device-specific optimizations (but not mixed precision for XTTS due to numerical instability)
         try:
             if device_type == DeviceType.NVIDIA_GPU and _xtts_mixed_precision_enabled:
+                print(f"🎯 Using NVIDIA GPU with mixed precision for XTTS-v2")
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     xtts_model.tts_to_file(**generation_params)
             elif device_type == DeviceType.APPLE_SILICON and _mps_available:
                 # Use MPS optimizations for Apple Silicon with XTTS
+                print(f"🍎 Using Apple Silicon MPS optimization for XTTS-v2")
                 with torch.inference_mode():  # Use inference mode for better MPS performance
                     try:
                         xtts_model.tts_to_file(**generation_params)
@@ -785,6 +853,7 @@ def _generate_xtts(
                             raise mps_error
             else:
                 # Use FP32 for XTTS to avoid numerical instability issues
+                print(f"💻 Using CPU/FP32 for XTTS-v2 (numerical stability)")
                 xtts_model.tts_to_file(**generation_params)
         except RuntimeError as e:
             error_msg = str(e)
@@ -834,201 +903,161 @@ def _generate_zonos(
     output_file: str,
     config: Dict[str, Any]
 ) -> str:
-    """Generate audio using Zonos with comprehensive hardware optimization."""
-    try:
-        # Get device optimization info
-        device_type, device_info = _get_device_optimization()
+    """
+    Generate audio using Zonos TTS with persistent worker optimization.
+    Falls back to single-shot mode if persistent worker fails.
+    """
+    print(f"🎤 Zonos Generation:")
+    print(f"   • Model: {model}")
+    print(f"   • Reference Audio: {ref_audio}")
+    print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+    print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+    print(f"   • Output File: {output_file}")
+    print(f"   • Config: {config}")
 
-        # Set up environment with comprehensive optimizations
-        env = {
-            **os.environ,
-            "CUDA_VISIBLE_DEVICES": str(config.get('cuda_device', '0')),
-            "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1" if config.get('torch_force_no_weights_only_load', True) else "0"
-        }
-
-        # Add device-specific environment variables
-        if DEVICE_OPTIMIZATION_AVAILABLE:
-            if device_type == DeviceType.NVIDIA_GPU:
-                env.update({
-                    "TORCH_CUDNN_V8_API_ENABLED": "1",
-                    "CUDA_LAUNCH_BLOCKING": "0",
-                    "TORCH_CUDNN_BENCHMARK": "1",
-                })
-                if device_info.get('is_high_end', False):
-                    env.update({
-                        "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1",
-                        "TORCH_ALLOW_TF32_MATMUL_OVERRIDE": "1",
-                    })
-            elif device_type == DeviceType.APPLE_SILICON:
-                env.update({
-                    "PYTORCH_ENABLE_MPS_FALLBACK": "1",
-                    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.0",
-                    "OMP_NUM_THREADS": str(min(device_info.get('cpu_count', 8), 8)),
-                })
-
-        # Import Zonos modules
+    # Try persistent worker first for better performance
+    use_persistent = config.get('use_persistent_worker', True)
+    device = config.get('torch_device', 'auto')
+    
+    if use_persistent:
         try:
-            from zonos.model import Zonos
-            from zonos.conditioning import make_cond_dict
-            from zonos.utils import DEFAULT_DEVICE as device
-        except ImportError as e:
-            raise ImportError(f"Zonos modules not available: {e}")
+            print("🚀 Attempting Zonos generation with persistent worker...")
+            return _generate_zonos_persistent(model, ref_audio, ref_text, gen_text, output_file, config, device)
+        except Exception as e:
+            print(f"⚠️ Persistent worker failed: {e}")
+            print("🔄 Falling back to single-shot mode...")
+    
+    # Fallback to single-shot subprocess mode
+    return _generate_zonos_subprocess(model, ref_audio, ref_text, gen_text, output_file, config)
 
-        print(
-            f"Loading Zonos model: {model} with {device_type.value if DEVICE_OPTIMIZATION_AVAILABLE else 'default'} optimization")
-        start_time = time.perf_counter()
 
-        # Determine optimal device for Zonos
-        zonos_device = device
-        if DEVICE_OPTIMIZATION_AVAILABLE:
-            if device_type == DeviceType.NVIDIA_GPU:
-                zonos_device = torch.device("cuda:0")
-            elif device_type == DeviceType.APPLE_SILICON and _mps_available:
-                zonos_device = torch.device("mps")
-            else:
-                zonos_device = torch.device("cpu")
-
-        # Load Zonos model with device optimization
-        zonos_model = Zonos.from_pretrained(model, device=zonos_device)
-
-        # Apply comprehensive model optimizations
-        if DEVICE_OPTIMIZATION_AVAILABLE:
-            if device_type == DeviceType.NVIDIA_GPU:
-                # Apply NVIDIA-specific optimizations
-                if _mixed_precision_enabled:
-                    try:
-                        zonos_model = zonos_model.half()
-                        print("✓ Applied mixed precision to Zonos model")
-                    except Exception as e:
-                        print(
-                            f"Warning: Mixed precision failed for Zonos: {e}")
-
-                if device_info.get('tts_compile', False) and hasattr(torch, 'compile'):
-                    try:
-                        zonos_model = torch.compile(
-                            zonos_model, mode="reduce-overhead")
-                        print("✓ Applied torch.compile optimization to Zonos model")
-                    except Exception as e:
-                        print(
-                            f"Warning: Could not apply torch.compile to Zonos: {e}")
-
-            elif device_type == DeviceType.APPLE_SILICON:
-                # Apply Apple Silicon optimizations
-                try:
-                    # Optimize for Apple Silicon
-                    torch.set_num_threads(
-                        min(device_info.get('cpu_count', 8), 8))
-                    print("✓ Applied Apple Silicon thread optimization to Zonos")
-                except Exception as e:
-                    print(
-                        f"Warning: Apple Silicon optimization failed for Zonos: {e}")
-
-        # Load reference audio and create speaker embedding
-        wav, sampling_rate = torchaudio.load(ref_audio)
-        wav = wav.to(zonos_device)
-
-        # Create speaker embedding with device optimization
-        if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                speaker = zonos_model.make_speaker_embedding(
-                    wav, sampling_rate)
+def _generate_zonos_persistent(
+    model: str,
+    ref_audio: str,
+    ref_text: str,
+    gen_text: str,
+    output_file: str,
+    config: Dict[str, Any],
+    device: str = "auto"
+) -> str:
+    """Generate audio using persistent Zonos worker."""
+    try:
+        # Get or create persistent worker
+        worker = _get_or_create_zonos_worker(model, device)
+        
+        # Prepare request
+        request = {
+            "model": model,
+            "ref_audio": ref_audio,
+            "ref_text": ref_text,
+            "gen_text": gen_text,
+            "output_file": output_file,
+            "config": config,
+            "device": device
+        }
+        
+        # Send request and get response
+        response = _send_request_to_zonos_worker(worker, request)
+        
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            raise RuntimeError(f"Zonos worker error: {error_msg}")
+        
+        # Check if output file was created
+        if not os.path.exists(output_file):
+            raise RuntimeError(f"Zonos worker completed but output file not found: {output_file}")
+        
+        generation_time = response.get("generation_time", 0)
+        load_time = response.get("load_time", 0)
+        cached = response.get("cached", False)
+        
+        print(f"✓ Zonos persistent generation completed in {generation_time:.2f}s")
+        if cached:
+            print(f"✓ Used cached model (load time: 0s)")
         else:
-            speaker = zonos_model.make_speaker_embedding(wav, sampling_rate)
+            print(f"✓ Model loaded in {load_time:.2f}s")
+        
+        return output_file
+        
+    except Exception as e:
+        # If persistent worker fails, clean it up and raise error
+        worker_key = _get_zonos_worker_key(model, device)
+        if worker_key in _zonos_workers:
+            try:
+                worker = _zonos_workers[worker_key]
+                worker.terminate()
+                del _zonos_workers[worker_key]
+                print(f"🧹 Cleaned up failed Zonos worker: {worker_key}")
+            except:
+                pass
+        raise e
 
-        # Generate speech using Zonos with model-specific settings
-        cond_dict = make_cond_dict(
-            text=gen_text,
-            speaker=speaker,
-            language=config.get('language', 'en-us')
-        )
-        
-        # Add Zonos-specific emotion parameters if available
-        emotion_params = {}
-        for i in range(1, 9):  # e1 through e8
-            emotion_key = f'e{i}'
-            if emotion_key in config:
-                emotion_params[emotion_key] = config[emotion_key]
-        
-        if emotion_params:
-            cond_dict.update(emotion_params)
-        
-        # Add other Zonos-specific parameters
-        if 'seed' in config:
-            torch.manual_seed(config['seed'])
-        if 'cfg_scale' in config:
-            cond_dict['cfg_scale'] = config['cfg_scale']
-        if 'speaking_rate' in config:
-            cond_dict['speaking_rate'] = config['speaking_rate']
-        if 'frequency_max' in config:
-            cond_dict['frequency_max'] = config['frequency_max']
-        if 'pitch_standard_deviation' in config:
-            cond_dict['pitch_standard_deviation'] = config['pitch_standard_deviation']
+
+def _generate_zonos_subprocess(
+    model: str,
+    ref_audio: str,
+    ref_text: str,
+    gen_text: str,
+    output_file: str,
+    config: Dict[str, Any]
+) -> str:
+    """Generate audio using single-shot Zonos subprocess (original method)."""
+    import subprocess
+    import json
+
+    # Get device configuration
+    device = config.get('torch_device', 'auto')
+
+    # Get conda environment path
+    conda_env_name = "tts_zonos"
+    conda_base = os.environ.get('CONDA_PREFIX', '/opt/miniconda3')
+    zonos_env_python = f"{conda_base}/envs/{conda_env_name}/bin/python"
+
+    # Check if conda environment exists
+    if not os.path.exists(zonos_env_python):
+        raise RuntimeError(f"Zonos conda environment not found at {zonos_env_python}")
+
+    # Path to worker script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    worker_script = os.path.join(current_dir, '..', '..', 'zonos_worker.py')
+
+    print(f"🚀 Starting Zonos worker process...")
+    print(f"   • Python: {zonos_env_python}")
+    print(f"   • Script: {worker_script}")
+    print(f"   • Device: {device}")
+
+    try:
+        # Run subprocess with timeout
+        result = subprocess.run([
+            zonos_env_python, worker_script,
+            '--model', model,
+            '--ref_audio', ref_audio,
+            '--ref_text', ref_text,
+            '--gen_text', gen_text,
+            '--output_file', output_file,
+            '--config', json.dumps(config),
+            '--device', device
+        ], capture_output=True, text=True, timeout=300)  # 5 minute timeout
+
+        if result.returncode != 0:
+            # Check for specific error patterns
+            stderr_output = result.stderr
+            stdout_output = result.stdout
             
-        conditioning = zonos_model.prepare_conditioning(cond_dict)
+            if "espeak" in stderr_output.lower():
+                raise RuntimeError("espeak-ng is required for Zonos but not available. Please install it with: brew install espeak-ng")
+            
+            raise RuntimeError(f"Zonos worker process failed (exit code {result.returncode}):\nSTDERR: {stderr_output}\nSTDOUT: {stdout_output}")
 
-        # Generate audio codes and decode with device-specific optimization
-        with torch.inference_mode():  # Use inference mode for better performance
-            if device_type == DeviceType.NVIDIA_GPU and _mixed_precision_enabled:
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    codes = zonos_model.generate(conditioning)
-                    wavs = zonos_model.autoencoder.decode(codes).cpu()
-            elif device_type == DeviceType.APPLE_SILICON and _mps_available:
-                # Use MPS optimizations for Apple Silicon with Zonos
-                try:
-                    codes = zonos_model.generate(conditioning)
-                    wavs = zonos_model.autoencoder.decode(codes).cpu()
-                except Exception as mps_error:
-                    if "mps" in str(mps_error).lower() or "metal" in str(mps_error).lower():
-                        print(f"⚠️  MPS inference failed for Zonos, falling back to CPU: {mps_error}")
-                        # Move model components to CPU temporarily
-                        original_device = zonos_device
-                        try:
-                            zonos_model = zonos_model.to('cpu')
-                            wav = wav.to('cpu')
-                            speaker = zonos_model.make_speaker_embedding(wav, sampling_rate)
-                            cond_dict = make_cond_dict(
-                                text=gen_text,
-                                speaker=speaker,
-                                language=config.get('language', 'en-us')
-                            )
-                            conditioning = zonos_model.prepare_conditioning(cond_dict)
-                            codes = zonos_model.generate(conditioning)
-                            wavs = zonos_model.autoencoder.decode(codes).cpu()
-                        finally:
-                            # Move back to original device if possible
-                            try:
-                                zonos_model = zonos_model.to(original_device)
-                            except:
-                                pass
-                    else:
-                        raise mps_error
-            else:
-                codes = zonos_model.generate(conditioning)
-                wavs = zonos_model.autoencoder.decode(codes).cpu()
+        # Check if output file was created
+        if not os.path.exists(output_file):
+            raise RuntimeError(f"Zonos generation completed but output file not found: {output_file}")
 
-        # Save generated audio
-        torchaudio.save(output_file, wavs[0],
-                        zonos_model.autoencoder.sampling_rate)
-
-        runtime = time.perf_counter() - start_time
-        print(f"✓ Zonos generation completed in {runtime:.3f}s")
-        print(f"✓ Voice cloning successful! Output saved to: {output_file}")
-
+        print("✓ Zonos single-shot generation completed successfully")
         return output_file
 
-    except RuntimeError as e:
-        if "espeak not installed" in str(e):
-            error_msg = (
-                "Error: espeak-ng is required for Zonos TTS.\n"
-                "Please install it using one of these commands:\n"
-                "Ubuntu/Debian: sudo apt install espeak-ng\n"
-                "MacOS: brew install espeak-ng"
-            )
-            print(error_msg)
-            raise RuntimeError(error_msg)
-        else:
-            raise RuntimeError(f"Zonos generation failed: {str(e)}")
-
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Zonos generation timed out after 5 minutes")
     except Exception as e:
         raise RuntimeError(f"Zonos generation failed: {str(e)}")
 
@@ -1037,7 +1066,7 @@ def get_supported_models():
     """Get list of supported TTS model options."""
     return [
         "f5tts",
-        "xtts",
+        "xtts", 
         "zonos"
     ]
 
@@ -1123,6 +1152,14 @@ def generate_cloned_audio_base64(
     Returns:
         Base64 encoded audio data
     """
+    print(f"🎵 TTS Base64 Audio Generation Request:")
+    print(f"   • Model: {model}")
+    print(f"   • Reference Audio: {ref_audio}")
+    print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+    print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+    print(f"   • Fast Mode: {fast_mode}")
+    print(f"   • Config: {config}")
+    
     try:
         # Generate audio to temporary file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
@@ -1270,47 +1307,55 @@ def preload_models_smart(models: List[str] = None, force_reload: bool = False):
 
 
 def unload_models():
-    """
-    Unload all TTS models from memory with comprehensive cleanup.
-    """
-    global _f5tts_model, _xtts_model, _model_load_times, _model_memory_usage
+    """Unload all TTS models from memory to free up resources."""
+    global _f5tts_model, _xtts_model, _f5tts_load_time, _xtts_load_time, _f5tts_memory_usage, _xtts_memory_usage
 
-    print("🧹 Unloading TTS models from memory...")
+    print("🧹 Unloading all TTS models from memory...")
 
+    # Unload F5TTS model
     if _f5tts_model is not None:
+        print("🗑️  Unloading F5TTS model...")
         del _f5tts_model
         _f5tts_model = None
-        print("✓ F5TTS model unloaded")
+        _f5tts_load_time = None
+        _f5tts_memory_usage = None
 
+    # Unload XTTS model
     if _xtts_model is not None:
+        print("🗑️  Unloading XTTS model...")
         del _xtts_model
         _xtts_model = None
-        print("✓ XTTS model unloaded")
+        _xtts_load_time = None
+        _xtts_memory_usage = None
 
-    # Clear performance metrics
-    _model_load_times.clear()
-    _model_memory_usage.clear()
+    # Clean up persistent Zonos workers
+    try:
+        _cleanup_zonos_workers()
+    except Exception as e:
+        print(f"Warning: Error cleaning up Zonos workers: {e}")
 
-    # Comprehensive memory cleanup
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        print("✓ CUDA cache cleared and synchronized")
+    # Clear GPU cache if available
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("✓ CUDA cache cleared and synchronized")
 
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        # Clear MPS cache if available
-        try:
-            torch.mps.empty_cache()
-            print("✓ MPS cache cleared")
-        except:
-            pass
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+                print("✓ MPS cache cleared")
+            except:
+                pass  # MPS cache clearing might not be available
+    except ImportError:
+        pass  # torch not available
 
     # Force garbage collection
     import gc
     gc.collect()
-    print("✓ Python garbage collection completed")
 
-    print("🎯 Model unloading completed!")
+    print("✓ All TTS models unloaded successfully")
 
 
 def get_loaded_models() -> Dict[str, bool]:
@@ -1432,6 +1477,12 @@ def generate_realtime_audio_base64(
         Base64 encoded audio data
     """
     print("🚀 Real-time audio generation mode activated")
+    print(f"🎵 Real-time TTS Generation Request:")
+    print(f"   • Model: {model}")
+    print(f"   • Reference Audio: {ref_audio}")
+    print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
+    print(f"   • Generation Text: {gen_text[:100]}{'...' if len(gen_text) > 100 else ''}")
+    print(f"   • Input Config: {config}")
     
     # Aggressive real-time configuration
     realtime_config = {
@@ -1451,6 +1502,15 @@ def generate_realtime_audio_base64(
         'tts_fast_preprocessing': True,
     })
     
+    print(f"🚀 Real-time Optimized Config:")
+    for key, value in realtime_config.items():
+        if key in ['ref_text', 'gen_text']:
+            # Truncate long text for readability
+            display_value = value[:100] + '...' if len(str(value)) > 100 else value
+            print(f"   • {key}: {display_value}")
+        else:
+            print(f"   • {key}: {value}")
+    
     return generate_cloned_audio_base64(
         model=model,
         ref_audio=ref_audio,
@@ -1459,3 +1519,166 @@ def generate_realtime_audio_base64(
         config=realtime_config,
         fast_mode=True
     )
+
+
+def _init_zonos_worker_lock():
+    """Initialize the lock for Zonos worker management."""
+    global _zonos_worker_lock
+    if _zonos_worker_lock is None:
+        import threading
+        _zonos_worker_lock = threading.Lock()
+
+
+def _get_zonos_worker_key(model: str, device: str = "auto") -> str:
+    """Generate a key for Zonos worker identification."""
+    return f"zonos_{model}_{device}"
+
+
+def _start_persistent_zonos_worker(model: str, device: str = "auto") -> subprocess.Popen:
+    """Start a persistent Zonos worker process."""
+    import subprocess
+    
+    # Get conda environment path
+    conda_env_name = "tts_zonos"
+    conda_base = os.environ.get('CONDA_PREFIX', '/opt/miniconda3')
+    zonos_env_python = f"{conda_base}/envs/{conda_env_name}/bin/python"
+    
+    # Check if conda environment exists
+    if not os.path.exists(zonos_env_python):
+        raise RuntimeError(f"Zonos conda environment not found at {zonos_env_python}")
+    
+    # Path to worker script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    worker_script = os.path.join(current_dir, '..', '..', 'zonos_worker.py')
+    
+    print(f"🚀 Starting persistent Zonos worker for model: {model}")
+    
+    # Start worker in persistent mode
+    worker = subprocess.Popen([
+        zonos_env_python, worker_script, 
+        '--persistent', '--device', device
+    ], 
+    stdin=subprocess.PIPE, 
+    stdout=subprocess.PIPE, 
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1  # Line buffered
+    )
+    
+    # Wait for READY signal
+    ready_line = worker.stdout.readline().strip()
+    if ready_line != "READY":
+        stderr_output = worker.stderr.read()
+        worker.terminate()
+        raise RuntimeError(f"Zonos worker failed to start. Output: {ready_line}, Error: {stderr_output}")
+    
+    print(f"✓ Persistent Zonos worker started for model: {model}")
+    return worker
+
+
+def _get_or_create_zonos_worker(model: str, device: str = "auto") -> subprocess.Popen:
+    """Get existing or create new persistent Zonos worker."""
+    _init_zonos_worker_lock()
+    
+    with _zonos_worker_lock:
+        worker_key = _get_zonos_worker_key(model, device)
+        
+        # Check if worker exists and is still alive
+        if worker_key in _zonos_workers:
+            worker = _zonos_workers[worker_key]
+            if worker.poll() is None:  # Process is still running
+                return worker
+            else:
+                # Worker died, remove it
+                print(f"⚠️ Zonos worker {worker_key} died, removing from cache")
+                del _zonos_workers[worker_key]
+        
+        # Create new worker
+        worker = _start_persistent_zonos_worker(model, device)
+        _zonos_workers[worker_key] = worker
+        return worker
+
+
+def _send_request_to_zonos_worker(worker: subprocess.Popen, request: dict) -> dict:
+    """Send a request to a persistent Zonos worker and get response."""
+    try:
+        # Send request
+        request_json = json.dumps(request) + '\n'
+        worker.stdin.write(request_json)
+        worker.stdin.flush()
+        
+        # Read response
+        response_line = worker.stdout.readline().strip()
+        if not response_line:
+            raise RuntimeError("No response from Zonos worker")
+        
+        response = json.loads(response_line)
+        return response
+        
+    except Exception as e:
+        # If communication fails, the worker might be dead
+        raise RuntimeError(f"Failed to communicate with Zonos worker: {e}")
+
+
+def _cleanup_zonos_workers():
+    """Clean up all persistent Zonos workers."""
+    _init_zonos_worker_lock()
+    
+    with _zonos_worker_lock:
+        for worker_key, worker in _zonos_workers.items():
+            try:
+                if worker.poll() is None:  # Still running
+                    worker.stdin.write("EXIT\n")
+                    worker.stdin.flush()
+                    worker.wait(timeout=5)  # Wait up to 5 seconds
+            except:
+                worker.terminate()  # Force terminate if needed
+            
+        _zonos_workers.clear()
+        print("✓ All persistent Zonos workers cleaned up")
+
+
+def preload_zonos_worker(model: str = "Zyphra/Zonos-v0.1-transformer", device: str = "auto") -> bool:
+    """
+    Preload a persistent Zonos worker for faster subsequent generations.
+    
+    Args:
+        model: Zonos model name to preload
+        device: Device to use (auto, cpu, cuda, mps)
+    
+    Returns:
+        bool: True if worker was successfully preloaded, False otherwise
+    """
+    try:
+        print(f"🚀 Preloading Zonos worker for model: {model}")
+        worker = _get_or_create_zonos_worker(model, device)
+        print(f"✓ Zonos worker preloaded successfully")
+        return True
+    except Exception as e:
+        print(f"✗ Failed to preload Zonos worker: {e}")
+        return False
+
+
+def get_zonos_worker_status() -> Dict[str, Any]:
+    """
+    Get status of all persistent Zonos workers.
+    
+    Returns:
+        dict: Status information about active workers
+    """
+    _init_zonos_worker_lock()
+    
+    with _zonos_worker_lock:
+        status = {
+            "active_workers": len(_zonos_workers),
+            "workers": {}
+        }
+        
+        for worker_key, worker in _zonos_workers.items():
+            is_alive = worker.poll() is None
+            status["workers"][worker_key] = {
+                "alive": is_alive,
+                "pid": worker.pid if is_alive else None
+            }
+        
+        return status

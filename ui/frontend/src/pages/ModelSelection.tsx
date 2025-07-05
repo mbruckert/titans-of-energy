@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import UploadProgress from "../components/UploadProgress";
 import { Download, Check, Loader } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+import { getCharacterCreationData, saveCharacterCreationData } from '../utils/characterCreation';
 
 interface ModelInfo {
     id: string;
@@ -50,25 +51,56 @@ const ModelSelection = () => {
         }
     };
 
+    // Restore previous selections when component mounts
+    useEffect(() => {
+        const existingData = getCharacterCreationData();
+        
+        if (existingData.llm_model) {
+            setSelectedModel(existingData.llm_model);
+        }
+        
+        if (existingData.llm_config) {
+            if (existingData.llm_config.api_key) {
+                setApiKey(existingData.llm_config.api_key);
+            }
+            if (existingData.llm_config.system_prompt) {
+                setSystemPrompt(existingData.llm_config.system_prompt);
+            }
+        }
+    }, []);
+
     // Update system prompt when model selection changes
     useEffect(() => {
-        const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+        const characterData = getCharacterCreationData();
         const characterName = characterData.name || 'the character';
         const selectedModelInfo = models.find(m => m.id === selectedModel);
         
-        const newSystemPrompt = generateSystemPrompt(characterName, selectedModelInfo);
-        setSystemPrompt(newSystemPrompt);
+        // Only update system prompt if it hasn't been manually set
+        if (!systemPrompt || systemPrompt === generateSystemPrompt(characterName, models.find(m => m.id === selectedModel))) {
+            const newSystemPrompt = generateSystemPrompt(characterName, selectedModelInfo);
+            setSystemPrompt(newSystemPrompt);
+        }
     }, [selectedModel, models]);
 
     // Prefill system prompt based on character name (initial load)
     useEffect(() => {
-        const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+        const characterData = getCharacterCreationData();
         const characterName = characterData.name || 'the character';
         
-        // Use base prompt initially, will be updated when model is selected
-        const defaultSystemPrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
-        setSystemPrompt(defaultSystemPrompt);
+        // Only set default if no existing system prompt
+        if (!systemPrompt) {
+            const defaultSystemPrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
+            setSystemPrompt(defaultSystemPrompt);
+        }
     }, []);
+
+    // Update showApiKey when selectedModel changes
+    useEffect(() => {
+        const selectedModelInfo = models.find(m => m.id === selectedModel);
+        if (selectedModelInfo) {
+            setShowApiKey(selectedModelInfo.requiresKey);
+        }
+    }, [selectedModel, models]);
 
     // Load models from API
     useEffect(() => {
@@ -229,33 +261,36 @@ const ModelSelection = () => {
         }
     };
 
+    // Save current progress before navigating
+    const saveProgress = () => {
+        const modelConfig = {
+            model_path: selectedModel,
+            system_prompt: systemPrompt.trim(),
+            ...(apiKey && { api_key: apiKey })
+        };
+
+        saveCharacterCreationData({
+            llm_model: selectedModel,
+            llm_config: modelConfig
+        });
+    };
+
     const handleSubmit = () => {
         const selectedModelInfo = models.find(m => m.id === selectedModel);
         if (selectedModelInfo && selectedModelInfo.available && 
             (!selectedModelInfo.requiresKey || apiKey) && systemPrompt.trim()) {
             
-            // Get existing character data from session storage
-            const existingData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
-            
-            // Add model configuration
-            const modelConfig = {
-                model_path: selectedModel,
-                system_prompt: systemPrompt.trim(),
-                ...(apiKey && { api_key: apiKey })
-            };
-
-            const updatedData = {
-                ...existingData,
-                llm_model: selectedModel,
-                llm_config: modelConfig
-            };
-
-            // Store updated data
-            sessionStorage.setItem('newCharacterData', JSON.stringify(updatedData));
-            
-            // Navigate to next step
+            saveProgress();
             navigate('/knowledge-base');
         }
+    };
+
+    const handleBack = () => {
+        // Save current progress before going back
+        if (selectedModel || apiKey || systemPrompt) {
+            saveProgress();
+        }
+        navigate('/character-selection');
     };
 
     if (loading) {
@@ -500,10 +535,10 @@ const ModelSelection = () => {
 
             <div className="flex justify-end space-x-2">
                 <button
-                    onClick={() => navigate('/character-selection')}
+                    onClick={handleBack}
                     className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
                 >
-                    Cancel
+                    Back
                 </button>
                 <button
                     onClick={handleSubmit}

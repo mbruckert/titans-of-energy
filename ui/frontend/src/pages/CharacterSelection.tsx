@@ -4,6 +4,13 @@ import CharacterCard from '../components/CharacterCard';
 import AddCharacterModal from '../components/AddCharacterModal';
 import EditCharacterModal from '../components/EditCharacterModal';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
+import { 
+  initializeCharacterCreation, 
+  isCharacterCreationInProgress, 
+  getCharacterCreationProgress,
+  saveCharacterCreationData,
+  saveCharacterCreationFiles
+} from '../utils/characterCreation';
 
 interface Character {
   id: number;
@@ -21,6 +28,7 @@ function CharacterSelection() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showProgressWarning, setShowProgressWarning] = useState(false);
 
   useEffect(() => {
     fetchCharacters();
@@ -48,23 +56,42 @@ function CharacterSelection() {
   };
 
   const handleAddCharacter = () => {
+    // Check if there's existing progress
+    if (isCharacterCreationInProgress()) {
+      setShowProgressWarning(true);
+    } else {
+      startNewCharacterCreation();
+    }
+  };
+
+  const startNewCharacterCreation = () => {
+    initializeCharacterCreation();
     setIsModalOpen(true);
+    setShowProgressWarning(false);
+  };
+
+  const continueExistingCreation = () => {
+    const progress = getCharacterCreationProgress();
+    setShowProgressWarning(false);
+    
+    // Navigate to the appropriate step based on progress
+    if (!progress.hasBasicInfo) {
+      setIsModalOpen(true);
+    } else if (!progress.hasModel) {
+      navigate('/model-selection');
+    } else if (!progress.hasKnowledgeBase) {
+      navigate('/knowledge-base');
+    } else if (!progress.hasVoiceCloning) {
+      navigate('/voice-cloning');
+    } else {
+      navigate('/style-tuning');
+    }
   };
 
   const handleSubmitCharacter = (name: string, imageFile: File, wakeword: string) => {
-    // Initialize global file storage if it doesn't exist
-    if (!window.characterCreationFiles) {
-      window.characterCreationFiles = {};
-    }
-    
-    // Store the image file in global storage
-    window.characterCreationFiles.imageFile = imageFile;
-    
-    // Store character data in session storage (without File objects)
-    sessionStorage.setItem('newCharacterData', JSON.stringify({
-      name,
-      wakeword
-    }));
+    // Save character data and files using utility functions
+    saveCharacterCreationData({ name, wakeword });
+    saveCharacterCreationFiles({ imageFile });
     
     console.log('Character image stored for creation:', imageFile.name);
     console.log('Character wakeword:', wakeword);
@@ -192,6 +219,38 @@ function CharacterSelection() {
         }}
         onSuccess={handleEditSuccess}
       />
+
+      {/* Progress Warning Modal */}
+      {showProgressWarning && (
+        <div className="fixed inset-0 bg-gray-800 bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full">
+            <h2 className="text-xl font-bold mb-4">Character Creation In Progress</h2>
+            <p className="text-gray-600 mb-6">
+              You have an unfinished character creation. Would you like to continue where you left off or start a new character?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowProgressWarning(false)}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={startNewCharacterCreation}
+                className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Start New
+              </button>
+              <button
+                onClick={continueExistingCreation}
+                className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600"
+              >
+                Continue Existing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

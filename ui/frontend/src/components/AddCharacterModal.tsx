@@ -93,12 +93,7 @@ const AddCharacterModal: React.FC<AddCharacterModalProps> = ({ isOpen, onClose, 
     if (name && image) {
       const finalWakeword = wakeword.trim() || `hey ${name.toLowerCase()}`;
       onSubmit(name, image, finalWakeword);
-      setName('');
-      setImage(null);
-      setPreviewUrl(null);
-      setWakeword('');
-      setNameError('');
-      onClose();
+      handleClose();
     }
   };
 
