@@ -23,6 +23,8 @@ const VoiceCloningUpload = () => {
   const [selectedModel, setSelectedModel] = useState<string>('f5tts');
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribingFileIndex, setTranscribingFileIndex] = useState<number | null>(null);
   
   // Preprocessing configuration state
   const [preprocessingConfig, setPreprocessingConfig] = useState({
@@ -255,6 +257,48 @@ const VoiceCloningUpload = () => {
 
   const getStepInfo = (stepId: string) => {
     return processingSteps.find(step => step.id === stepId);
+  };
+
+  const transcribeAudio = async (fileIndex: number) => {
+    if (fileIndex < 0 || fileIndex >= files.length) return;
+
+    const fileToTranscribe = files[fileIndex];
+    setTranscribingFileIndex(fileIndex);
+    setIsTranscribing(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', fileToTranscribe);
+
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TRANSCRIBE_AUDIO}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to transcribe audio');
+      }
+
+      const result = await response.json();
+      
+      if (result.transcript) {
+        // Append or replace the reference text
+        if (referenceText.trim()) {
+          setReferenceText(prev => prev + '\n\n' + result.transcript);
+        } else {
+          setReferenceText(result.transcript);
+        }
+      } else {
+        throw new Error('No transcription received');
+      }
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to transcribe audio');
+    } finally {
+      setIsTranscribing(false);
+      setTranscribingFileIndex(null);
+    }
   };
 
   const createCharacter = async () => {
@@ -512,6 +556,44 @@ const VoiceCloningUpload = () => {
             rows={3}
             placeholder="Enter the text that matches your audio sample..."
           />
+          
+          {/* Transcription Helper */}
+          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-medium text-blue-900">🎤 Auto-transcribe Voice Files</h4>
+              <span className="text-xs text-blue-600">Optional</span>
+            </div>
+            <p className="text-xs text-blue-700 mb-3">
+              Transcribe your uploaded voice files to automatically generate reference text. This can help create accurate text that matches your audio.
+            </p>
+            
+            {files.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => transcribeAudio(0)}
+                disabled={isTranscribing}
+                className="w-full py-2 px-3 bg-white text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors text-sm"
+              >
+                {isTranscribing ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500 mr-2"></div>
+                    Transcribing...
+                  </div>
+                ) : (
+                  '🎤 Transcribe Audio'
+                )}
+              </button>
+            ) : (
+              <div className="text-xs text-gray-500 italic">
+                Upload voice files above to enable transcription
+              </div>
+            )}
+            
+            <div className="mt-2 text-xs text-blue-600">
+              💡 <strong>Note:</strong> Manual transcription or review is still recommended to make the TTS more accurate. 
+              The auto-transcription is a helpful starting point, but you should verify and edit the text as needed.
+            </div>
+          </div>
         </div>
       )}
 

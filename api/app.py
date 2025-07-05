@@ -1639,14 +1639,15 @@ def ask_question_text():
 def transcribe_audio():
     """
     Transcribe audio to text using optimized Whisper with comprehensive device optimization.
-    Expects: multipart/form-data with 'audio_file'
+    Expects: multipart/form-data with 'audio_file' or 'audio'
     Returns: {"transcript": str, "status": "success"}
     """
     try:
-        audio_file = request.files.get('audio_file')
+        # Accept both 'audio_file' and 'audio' parameter names for compatibility
+        audio_file = request.files.get('audio_file') or request.files.get('audio')
 
         if not audio_file:
-            return jsonify({"error": "audio_file is required"}), 400
+            return jsonify({"error": "audio_file or audio is required"}), 400
 
         # Save uploaded audio file temporarily
         temp_audio_path = None

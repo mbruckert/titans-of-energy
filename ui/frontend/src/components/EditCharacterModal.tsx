@@ -30,6 +30,17 @@ interface VectorConfig {
   };
 }
 
+interface ModelInfo {
+  id: string;
+  name: string;
+  type: string;
+  repo: string;
+  requiresKey: boolean;
+  available: boolean;
+  downloaded: boolean;
+  custom?: boolean;
+}
+
 const EditCharacterModal: React.FC<EditCharacterModalProps> = ({ 
   isOpen, 
   character, 
@@ -48,11 +59,14 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [apiKey, setApiKey] = useState<string>('');
   const [systemPrompt, setSystemPrompt] = useState<string>('');
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   // Voice cloning state
   const [voiceFile, setVoiceFile] = useState<File | null>(null);
   const [referenceText, setReferenceText] = useState<string>('');
   const [selectedTTSModel, setSelectedTTSModel] = useState<string>('f5tts');
+  const [isTranscribing, setIsTranscribing] = useState(false);
 
   // File upload state
   const [knowledgeBaseFile, setKnowledgeBaseFile] = useState<File | null>(null);
@@ -97,13 +111,6 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
   // Drag and drop state for reordering
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
-  const models = [
-    { id: 'gemma-3-4b', name: 'Gemma3 4B', requiresKey: false },
-    { id: 'llama-3.2-3b', name: 'Llama 3.2 3B', requiresKey: false },
-    { id: 'gpt-4o', name: 'GPT-4o', requiresKey: true },
-    { id: 'gpt-4o-mini', name: 'GPT-4o-mini', requiresKey: true },
-  ];
-
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS' },
     { id: 'xtts', name: 'XTTS-v2' },
@@ -114,6 +121,89 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     { id: 'remove_silence', name: 'Remove Silence', description: 'Remove quiet segments' },
     { id: 'enhance', name: 'Enhance Audio', description: 'Quality enhancement' },
   ];
+
+  // Helper function to determine if a model is hosted (API-based) or local
+  const isHostedModel = (model: ModelInfo | undefined) => {
+    if (!model) return false;
+    return model.type === 'openai_api';
+  };
+
+  // Helper function to generate system prompt based on model type
+  const generateSystemPrompt = (characterName: string, modelInfo: ModelInfo | undefined, existingPrompt?: string) => {
+    // If there's an existing prompt, check if it needs updating
+    if (existingPrompt && existingPrompt.trim()) {
+      const basePromptPattern = /^You are .+ answering questions in their style, so answer in the first person\. Output at MOST 30 words\.$/;
+      const localPromptPattern = /^You are .+ answering questions in their style, so answer in the first person\. Output at MOST 30 words\. MAKE SURE YOU ONLY ANSWER THE REQUESTED QUESTION AND NOTHING ELSE \+ DO NOT ASK FURTHER QUESTIONS$/;
+      
+      // If it's a custom prompt (doesn't match our patterns), keep it as-is
+      if (!basePromptPattern.test(existingPrompt) && !localPromptPattern.test(existingPrompt)) {
+        return existingPrompt;
+      }
+    }
+    
+    const basePrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
+    
+    if (isHostedModel(modelInfo)) {
+      // Hosted models: use the base prompt as-is
+      return basePrompt;
+    } else {
+      // Local models: add the additional instruction
+      return `${basePrompt} MAKE SURE YOU ONLY ANSWER THE REQUESTED QUESTION AND NOTHING ELSE + DO NOT ASK FURTHER QUESTIONS`;
+    }
+  };
+
+  // Load models from API
+  useEffect(() => {
+    const loadModels = async () => {
+      try {
+        setLoadingModels(true);
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_LLM_MODELS}`);
+        
+        if (!response.ok) {
+          throw new Error('Failed to load models');
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+          setModels(data.models);
+        } else {
+          throw new Error(data.error || 'Failed to load models');
+        }
+      } catch (err) {
+        console.error('Error loading models:', err);
+        // Fallback to default models if API fails
+        setModels([
+          { id: 'google-gemma-3-4b-it-qat-q4_0-gguf', name: 'Gemma3 4B', type: 'gguf', repo: 'google/gemma-3-4b-it-qat-q4_0-gguf:gemma-3-4b-it-q4_0.gguf', requiresKey: false, available: false, downloaded: false },
+          { id: 'llama-3.2-3b', name: 'Llama 3.2 3B', type: 'huggingface', repo: 'meta-llama/Llama-3.2-3B', requiresKey: false, available: false, downloaded: false },
+          { id: 'gpt-4o', name: 'GPT-4o', type: 'openai_api', repo: 'gpt-4o', requiresKey: true, available: true, downloaded: true },
+          { id: 'gpt-4o-mini', name: 'GPT-4o-mini', type: 'openai_api', repo: 'gpt-4o-mini', requiresKey: true, available: true, downloaded: true },
+        ]);
+      } finally {
+        setLoadingModels(false);
+      }
+    };
+
+    if (isOpen) {
+      loadModels();
+    }
+  }, [isOpen]);
+
+  // Update system prompt when model selection changes
+  useEffect(() => {
+    if (selectedModel && models.length > 0) {
+      const selectedModelInfo = models.find(m => m.id === selectedModel);
+      const characterName = name || 'the character';
+      const currentPrompt = systemPrompt;
+      
+      const newSystemPrompt = generateSystemPrompt(characterName, selectedModelInfo, currentPrompt);
+      
+      // Only update if the prompt has changed
+      if (newSystemPrompt !== currentPrompt) {
+        setSystemPrompt(newSystemPrompt);
+      }
+    }
+  }, [selectedModel, models, name]);
 
   useEffect(() => {
     const fetchCharacterDetails = async () => {
@@ -142,7 +232,8 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
             setSelectedModel(fullCharacter.llm_model || '');
             if (fullCharacter.llm_config) {
               setApiKey(fullCharacter.llm_config.api_key || '');
-              setSystemPrompt(fullCharacter.llm_config.system_prompt || '');
+              const existingPrompt = fullCharacter.llm_config.system_prompt || '';
+              setSystemPrompt(existingPrompt);
             }
             
             // Set voice cloning info
@@ -214,6 +305,45 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       setStyleTuningFile(file);
+    }
+  };
+
+  const transcribeAudio = async () => {
+    if (!voiceFile) return;
+
+    setIsTranscribing(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', voiceFile);
+
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TRANSCRIBE_AUDIO}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to transcribe audio');
+      }
+
+      const result = await response.json();
+      
+      if (result.transcript) {
+        // Append or replace the reference text
+        if (referenceText.trim()) {
+          setReferenceText(prev => prev + '\n\n' + result.transcript);
+        } else {
+          setReferenceText(result.transcript);
+        }
+      } else {
+        throw new Error('No transcription received');
+      }
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to transcribe audio');
+    } finally {
+      setIsTranscribing(false);
     }
   };
 
@@ -329,7 +459,7 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-gray-800 bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+      <div className="bg-gray-50 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <h2 className="text-2xl font-bold mb-4">Edit Character</h2>
         
         {error && (
@@ -365,7 +495,7 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
             
             <form onSubmit={handleSubmit} className="space-y-6">
             {/* Basic Info */}
-            <div>
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
               <h3 className="text-lg font-semibold mb-2">Basic Information</h3>
               <div className="mb-4">
                 <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
@@ -433,27 +563,51 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
             </div>
 
             {/* LLM Model Configuration */}
-            <div>
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
               <h3 className="text-lg font-semibold mb-2">Language Model</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                {models.map((model) => (
-                  <button
-                    key={model.id}
-                    type="button"
-                    onClick={() => setSelectedModel(model.id)}
-                    className={`p-3 border rounded-lg text-left transition-all ${
-                      selectedModel === model.id
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    <h4 className="font-semibold text-sm">{model.name}</h4>
-                    {model.requiresKey && (
-                      <span className="text-xs text-gray-500">Requires API Key</span>
-                    )}
-                  </button>
-                ))}
-              </div>
+              {loadingModels ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-500"></div>
+                  <span className="ml-2 text-gray-600">Loading models...</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  {models.map((model) => (
+                    <button
+                      key={model.id}
+                      type="button"
+                      onClick={() => model.available && setSelectedModel(model.id)}
+                      disabled={!model.available}
+                      className={`p-3 border rounded-lg text-left transition-all ${
+                        selectedModel === model.id
+                          ? 'border-gray-500 bg-gray-50'
+                          : model.available
+                          ? 'border-gray-200 hover:border-gray-300'
+                          : 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="font-semibold text-sm">{model.name}</h4>
+                          {model.requiresKey && (
+                            <span className="text-xs text-gray-500">Requires API Key</span>
+                          )}
+                          {model.custom && (
+                            <span className="text-xs text-blue-600">Custom Model</span>
+                          )}
+                        </div>
+                        <div className="flex flex-col items-end">
+                          {model.available ? (
+                            <span className="text-xs text-green-600">Available</span>
+                          ) : (
+                            <span className="text-xs text-red-600">Not Available</span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {models.find(m => m.id === selectedModel)?.requiresKey && (
                 <div className="mb-4">
@@ -475,19 +629,35 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                 <label htmlFor="systemPrompt" className="block text-sm font-medium text-gray-700 mb-1">
                   System Prompt
                 </label>
+                <div className="mb-2">
+                  <div className="text-xs text-gray-500">
+                    {selectedModel && models.find(m => m.id === selectedModel) ? (
+                      isHostedModel(models.find(m => m.id === selectedModel)) ? (
+                        <span className="text-blue-600">📡 Hosted model - using standard prompt</span>
+                      ) : (
+                        <span className="text-green-600">💻 Local model - using enhanced prompt with additional constraints</span>
+                      )
+                    ) : (
+                      <span>Select a model to see prompt type</span>
+                    )}
+                  </div>
+                </div>
                 <textarea
                   id="systemPrompt"
                   value={systemPrompt}
                   onChange={(e) => setSystemPrompt(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  rows={3}
+                  rows={4}
                   placeholder="Enter the system prompt..."
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  The system prompt is automatically adjusted based on the model type. You can customize it if needed.
+                </p>
               </div>
             </div>
 
             {/* Voice Cloning */}
-            <div>
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
               <h3 className="text-lg font-semibold mb-2">Voice Cloning</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                 {ttsModels.map((model) => (
@@ -548,6 +718,44 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                   placeholder="Text that matches the audio..."
                   required
                 />
+                
+                {/* Transcription Helper */}
+                <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-medium text-blue-900">🎤 Auto-transcribe Voice File</h4>
+                    <span className="text-xs text-blue-600">Optional</span>
+                  </div>
+                  <p className="text-xs text-blue-700 mb-3">
+                    Transcribe your uploaded voice file to automatically generate reference text. This can help create accurate text that matches your audio.
+                  </p>
+                  
+                  {voiceFile ? (
+                    <button
+                      type="button"
+                      onClick={transcribeAudio}
+                      disabled={isTranscribing}
+                      className="w-full py-2 px-3 bg-white text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors text-sm"
+                    >
+                      {isTranscribing ? (
+                        <div className="flex items-center justify-center">
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500 mr-2"></div>
+                          Transcribing...
+                        </div>
+                      ) : (
+                        '🎤 Transcribe Audio'
+                      )}
+                    </button>
+                  ) : (
+                    <div className="text-xs text-gray-500 italic">
+                      Upload a voice file above to enable transcription
+                    </div>
+                  )}
+                  
+                  <div className="mt-2 text-xs text-blue-600">
+                    💡 <strong>Note:</strong> Manual transcription or review is still recommended to make the TTS more accurate. 
+                    The auto-transcription is a helpful starting point, but you should verify and edit the text as needed.
+                  </div>
+                </div>
               </div>
 
               {/* Audio Preprocessing Configuration */}
@@ -742,7 +950,7 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
             </div>
 
             {/* Additional Files */}
-            <div>
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
               <h3 className="text-lg font-semibold mb-2">Additional Files</h3>
               
               {/* Knowledge Base Section */}

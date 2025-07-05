@@ -31,11 +31,41 @@ const ModelSelection = () => {
     const [customModelName, setCustomModelName] = useState<string>('');
     const [isCustomModelDownloading, setIsCustomModelDownloading] = useState<boolean>(false);
 
-    // Prefill system prompt based on character name
+    // Helper function to determine if a model is hosted (API-based) or local
+    const isHostedModel = (model: ModelInfo | undefined) => {
+        if (!model) return false;
+        return model.type === 'openai_api';
+    };
+
+    // Helper function to generate system prompt based on model type
+    const generateSystemPrompt = (characterName: string, modelInfo: ModelInfo | undefined) => {
+        const basePrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
+        
+        if (isHostedModel(modelInfo)) {
+            // Hosted models: use the base prompt as-is
+            return basePrompt;
+        } else {
+            // Local models: add the additional instruction
+            return `${basePrompt} MAKE SURE YOU ONLY ANSWER THE REQUESTED QUESTION AND NOTHING ELSE + DO NOT ASK FURTHER QUESTIONS`;
+        }
+    };
+
+    // Update system prompt when model selection changes
+    useEffect(() => {
+        const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
+        const characterName = characterData.name || 'the character';
+        const selectedModelInfo = models.find(m => m.id === selectedModel);
+        
+        const newSystemPrompt = generateSystemPrompt(characterName, selectedModelInfo);
+        setSystemPrompt(newSystemPrompt);
+    }, [selectedModel, models]);
+
+    // Prefill system prompt based on character name (initial load)
     useEffect(() => {
         const characterData = JSON.parse(sessionStorage.getItem('newCharacterData') || '{}');
         const characterName = characterData.name || 'the character';
         
+        // Use base prompt initially, will be updated when model is selected
         const defaultSystemPrompt = `You are ${characterName} answering questions in their style, so answer in the first person. Output at MOST 30 words.`;
         setSystemPrompt(defaultSystemPrompt);
     }, []);
@@ -441,16 +471,29 @@ const ModelSelection = () => {
                     <label htmlFor="systemPrompt" className="block text-sm font-medium text-gray-700 mb-1">
                         System Prompt
                     </label>
+                    <div className="mb-2">
+                        <div className="text-xs text-gray-500">
+                            {selectedModel && models.find(m => m.id === selectedModel) ? (
+                                isHostedModel(models.find(m => m.id === selectedModel)) ? (
+                                    <span className="text-blue-600">📡 Hosted model - using standard prompt</span>
+                                ) : (
+                                    <span className="text-green-600">💻 Local model - using enhanced prompt with additional constraints</span>
+                                )
+                            ) : (
+                                <span>Select a model to see prompt type</span>
+                            )}
+                        </div>
+                    </div>
                     <textarea
                         id="systemPrompt"
                         value={systemPrompt}
                         onChange={(e) => setSystemPrompt(e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black"
-                        rows={3}
+                        rows={4}
                         placeholder="Enter the system prompt that defines how your character should behave..."
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                        This prompt defines your character's personality and response style. Keep it concise for better results.
+                        The system prompt is automatically adjusted based on the model type. You can customize it if needed.
                     </p>
                 </div>
             </div>
