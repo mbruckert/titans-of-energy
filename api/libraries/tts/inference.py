@@ -1009,13 +1009,7 @@ def _generate_zonos_subprocess(
     device = config.get('torch_device', 'auto')
 
     # Get conda environment path
-    conda_env_name = "tts_zonos"
-    conda_base = os.environ.get('CONDA_PREFIX', '/opt/miniconda3')
-    zonos_env_python = f"{conda_base}/envs/{conda_env_name}/bin/python"
-
-    # Check if conda environment exists
-    if not os.path.exists(zonos_env_python):
-        raise RuntimeError(f"Zonos conda environment not found at {zonos_env_python}")
+    zonos_env_python = _get_zonos_env_python()
 
     # Path to worker script
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1521,6 +1515,68 @@ def generate_realtime_audio_base64(
     )
 
 
+def _get_conda_base_path():
+    """
+    Get the conda base installation path.
+    Uses the same logic as the app.py setup function.
+    """
+    conda_base = None
+    
+    # First try to get conda base from CONDA_EXE environment variable
+    conda_exe = os.environ.get('CONDA_EXE')
+    if conda_exe and os.path.exists(conda_exe):
+        # Extract base path from conda executable
+        conda_base = os.path.dirname(os.path.dirname(conda_exe))
+    
+    # If that doesn't work, try to find conda in common locations
+    if not conda_base:
+        possible_conda_paths = [
+            '/opt/miniconda3',
+            '/opt/anaconda3',
+            '/usr/local/miniconda3',
+            '/usr/local/anaconda3',
+            os.path.expanduser('~/miniconda3'),
+            os.path.expanduser('~/anaconda3')
+        ]
+        
+        for path in possible_conda_paths:
+            if os.path.exists(os.path.join(path, 'bin', 'conda')):
+                conda_base = path
+                break
+    
+    # Last resort: try to get from current CONDA_PREFIX by going up directories
+    if not conda_base:
+        current_prefix = os.environ.get('CONDA_PREFIX')
+        if current_prefix:
+            # Check if we're in a conda environment (has /envs/ in path)
+            if '/envs/' in current_prefix:
+                # Extract base conda path (everything before /envs/)
+                potential_base = current_prefix.split('/envs/')[0]
+                if os.path.exists(os.path.join(potential_base, 'bin', 'conda')):
+                    conda_base = potential_base
+            else:
+                # We might be in the base environment
+                if os.path.exists(os.path.join(current_prefix, 'bin', 'conda')):
+                    conda_base = current_prefix
+    
+    return conda_base
+
+
+def _get_zonos_env_python():
+    """Get the path to the Zonos conda environment Python executable."""
+    conda_base = _get_conda_base_path()
+    if not conda_base:
+        raise RuntimeError("Could not find conda installation")
+    
+    conda_env_name = "tts_zonos"
+    zonos_env_python = os.path.join(conda_base, 'envs', conda_env_name, 'bin', 'python')
+    
+    if not os.path.exists(zonos_env_python):
+        raise RuntimeError(f"Zonos conda environment not found at {zonos_env_python}")
+    
+    return zonos_env_python
+
+
 def _init_zonos_worker_lock():
     """Initialize the lock for Zonos worker management."""
     global _zonos_worker_lock
@@ -1539,19 +1595,20 @@ def _start_persistent_zonos_worker(model: str, device: str = "auto") -> subproce
     import subprocess
     
     # Get conda environment path
-    conda_env_name = "tts_zonos"
-    conda_base = os.environ.get('CONDA_PREFIX', '/opt/miniconda3')
-    zonos_env_python = f"{conda_base}/envs/{conda_env_name}/bin/python"
-    
-    # Check if conda environment exists
-    if not os.path.exists(zonos_env_python):
-        raise RuntimeError(f"Zonos conda environment not found at {zonos_env_python}")
+    zonos_env_python = _get_zonos_env_python()
     
     # Path to worker script
     current_dir = os.path.dirname(os.path.abspath(__file__))
     worker_script = os.path.join(current_dir, '..', '..', 'zonos_worker.py')
     
     print(f"🚀 Starting persistent Zonos worker for model: {model}")
+    print(f"   • Python: {zonos_env_python}")
+    print(f"   • Script: {worker_script}")
+    print(f"   • Device: {device}")
+    
+    # Verify script exists
+    if not os.path.exists(worker_script):
+        raise RuntimeError(f"Zonos worker script not found: {worker_script}")
     
     # Start worker in persistent mode
     worker = subprocess.Popen([
@@ -1565,14 +1622,52 @@ def _start_persistent_zonos_worker(model: str, device: str = "auto") -> subproce
     bufsize=1  # Line buffered
     )
     
-    # Wait for READY signal
-    ready_line = worker.stdout.readline().strip()
+    print(f"🔄 Waiting for READY signal from worker (PID: {worker.pid})...")
+    
+    # Wait for READY signal with timeout
+    import select
+    import time
+    
+    start_time = time.time()
+    timeout = 30  # 30 seconds for startup
+    
+    while True:
+        # Check if worker is still alive
+        if worker.poll() is not None:
+            stderr_output = worker.stderr.read()
+            stdout_output = worker.stdout.read()
+            raise RuntimeError(f"Zonos worker died during startup (exit code: {worker.returncode}).\nSTDOUT: {stdout_output}\nSTDERR: {stderr_output}")
+        
+        # Check for timeout
+        if time.time() - start_time > timeout:
+            worker.terminate()
+            raise RuntimeError(f"Zonos worker startup timeout after {timeout} seconds")
+        
+        # Try to read READY signal
+        try:
+            if hasattr(select, 'select'):
+                # Unix/Linux/macOS
+                ready, _, _ = select.select([worker.stdout], [], [], 1.0)  # 1 second timeout
+                if ready:
+                    ready_line = worker.stdout.readline().strip()
+                    if ready_line:
+                        break
+            else:
+                # Windows fallback
+                ready_line = worker.stdout.readline().strip()
+                if ready_line:
+                    break
+                time.sleep(0.1)
+        except Exception as read_error:
+            print(f"⚠️ Error reading startup signal: {read_error}")
+            time.sleep(0.1)
+    
     if ready_line != "READY":
         stderr_output = worker.stderr.read()
         worker.terminate()
-        raise RuntimeError(f"Zonos worker failed to start. Output: {ready_line}, Error: {stderr_output}")
+        raise RuntimeError(f"Zonos worker failed to start. Expected 'READY', got: '{ready_line}'. Error: {stderr_output}")
     
-    print(f"✓ Persistent Zonos worker started for model: {model}")
+    print(f"✓ Persistent Zonos worker started for model: {model} (PID: {worker.pid})")
     return worker
 
 
@@ -1602,21 +1697,73 @@ def _get_or_create_zonos_worker(model: str, device: str = "auto") -> subprocess.
 def _send_request_to_zonos_worker(worker: subprocess.Popen, request: dict) -> dict:
     """Send a request to a persistent Zonos worker and get response."""
     try:
+        print(f"📤 Sending request to Zonos worker...")
+        print(f"   • Model: {request.get('model', 'unknown')}")
+        print(f"   • Device: {request.get('device', 'unknown')}")
+        print(f"   • Output: {request.get('output_file', 'unknown')}")
+        
         # Send request
         request_json = json.dumps(request) + '\n'
         worker.stdin.write(request_json)
         worker.stdin.flush()
+        print(f"✓ Request sent to worker")
         
-        # Read response
-        response_line = worker.stdout.readline().strip()
+        # Read response with timeout
+        import select
+        import time
+        
+        start_time = time.time()
+        timeout = 300  # 5 minutes
+        
+        while True:
+            # Check if worker is still alive
+            if worker.poll() is not None:
+                stderr_output = worker.stderr.read()
+                raise RuntimeError(f"Zonos worker died while processing request. Error: {stderr_output}")
+            
+            # Check for timeout
+            if time.time() - start_time > timeout:
+                raise RuntimeError(f"Zonos worker response timeout after {timeout} seconds")
+            
+            # Try to read response (non-blocking on Unix systems)
+            try:
+                if hasattr(select, 'select'):
+                    # Unix/Linux/macOS
+                    ready, _, _ = select.select([worker.stdout], [], [], 1.0)  # 1 second timeout
+                    if ready:
+                        response_line = worker.stdout.readline().strip()
+                        if response_line:
+                            break
+                else:
+                    # Windows fallback
+                    response_line = worker.stdout.readline().strip()
+                    if response_line:
+                        break
+                    time.sleep(0.1)
+            except Exception as read_error:
+                print(f"⚠️ Error reading from worker: {read_error}")
+                time.sleep(0.1)
+        
         if not response_line:
             raise RuntimeError("No response from Zonos worker")
         
-        response = json.loads(response_line)
+        print(f"📥 Received response from worker: {response_line[:200]}{'...' if len(response_line) > 200 else ''}")
+        
+        try:
+            response = json.loads(response_line)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON response from Zonos worker: {e}. Response: {response_line[:500]}")
+        
+        if response.get("success", False):
+            print(f"✓ Worker completed successfully")
+        else:
+            print(f"✗ Worker reported error: {response.get('error', 'unknown')}")
+        
         return response
         
     except Exception as e:
         # If communication fails, the worker might be dead
+        print(f"❌ Communication with Zonos worker failed: {e}")
         raise RuntimeError(f"Failed to communicate with Zonos worker: {e}")
 
 
