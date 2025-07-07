@@ -21,6 +21,7 @@ A Robust Pipeline to train new virtual clones of historical characters, starting
 - Docker and Docker Compose
 - Python 3.8+ (for CLI usage)
 - Git
+- Optional: Conda/MiniConda (This is only neccesary if you want to use the Zonos VoiceCloning model).
 
 ### 1. Clone and Setup Environment
 
