@@ -1203,7 +1203,7 @@ def create_character():
 
                 # Process all documents in the directory
                 process_documents_for_collection(
-                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config, force_recreate=True)
                 
                 print(f"Successfully processed {len(kb_file_paths)} knowledge base files for {name}")
                 
@@ -1338,7 +1338,7 @@ def create_character():
 
                     # Process the documents
                     process_documents_for_collection(
-                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
+                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config, force_recreate=True)
                     
                     # Ensure collection is compatible with embedding model
                     compatibility_result = ensure_character_collections_compatible(
@@ -2951,7 +2951,7 @@ def update_character(character_id):
 
                 # Process all documents in the directory (this will replace the existing collection)
                 process_documents_for_collection(
-                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
+                    str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config, force_recreate=True)
                 
                 print(f"✅ Successfully updated and processed {len(kb_file_paths)} knowledge base files for {new_name}")
                 
@@ -3250,7 +3250,7 @@ def update_character(character_id):
 
                     # Process the documents (this will replace the existing collection)
                     process_documents_for_collection(
-                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
+                        str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config, force_recreate=True)
                     
                     print(f"✅ Successfully updated and processed style tuning data for {new_name}")
                     

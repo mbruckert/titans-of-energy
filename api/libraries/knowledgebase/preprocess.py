@@ -516,7 +516,7 @@ def process_document(file_path: str, source: str, embedding_config: Dict[str, An
     return processed_chunks
 
 
-def insert_into_chroma(collection_name: str, chunk_data: List[Dict[str, Any]], embedding_config: Dict[str, Any]) -> None:
+def insert_into_chroma(collection_name: str, chunk_data: List[Dict[str, Any]], embedding_config: Dict[str, Any], force_recreate: bool = False) -> None:
     """
     Insert processed chunks into ChromaDB collection using batch processing.
     Creates collection with embedding model metadata for future compatibility checking.
@@ -525,13 +525,14 @@ def insert_into_chroma(collection_name: str, chunk_data: List[Dict[str, Any]], e
         collection_name: Name of the ChromaDB collection
         chunk_data: List of processed chunks to insert
         embedding_config: Configuration for embedding model
+        force_recreate: If True, force deletion and recreation of the collection even if compatible
     """
     if not chunk_data:
         print("No chunks to insert")
         return
 
     try:
-        # Check if collection exists and is compatible
+        # Check if collection exists
         collection_exists = True
         try:
             existing_collection = chroma_client.get_collection(collection_name)
@@ -539,7 +540,11 @@ def insert_into_chroma(collection_name: str, chunk_data: List[Dict[str, Any]], e
             collection_exists = False
         
         if collection_exists:
-            if not is_embedding_model_compatible(collection_name, embedding_config):
+            if force_recreate:
+                print(f"🔄 Force recreating collection '{collection_name}' - deleting existing collection")
+                backup_and_recreate_collection(collection_name, embedding_config)
+                collection_exists = False
+            elif not is_embedding_model_compatible(collection_name, embedding_config):
                 print(f"🔄 Embedding model incompatible - recreating collection '{collection_name}'")
                 backup_and_recreate_collection(collection_name, embedding_config)
                 collection_exists = False
@@ -647,7 +652,7 @@ def process_single_file(file_info: Tuple[str, str, str, Dict[str, Any]]) -> Tupl
         return filename, []
 
 
-def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collection_name: str, embedding_config: Dict[str, Any]) -> None:
+def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collection_name: str, embedding_config: Dict[str, Any], force_recreate: bool = False) -> None:
     """
     Process all new text and JSON files and add them to ChromaDB collection using parallel processing.
     Automatically handles embedding model compatibility and collection recreation.
@@ -657,6 +662,7 @@ def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collec
         archive_dir: Directory to move processed documents to
         collection_name: Name of the ChromaDB collection
         embedding_config: Configuration for embedding model
+        force_recreate: If True, force deletion and recreation of the collection even if compatible
     """
     if not os.path.exists(new_docs_dir):
         print(f"Source directory {new_docs_dir} does not exist")
@@ -674,8 +680,17 @@ def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collec
     print(f"🚀 Processing {total_files} files using {DEVICE_NAME}...")
     print(f"📊 Embedding model: {embedding_config.get('model_type')}:{embedding_config.get('model_name')}")
     
-    # Check embedding model compatibility
-    if not is_embedding_model_compatible(collection_name, embedding_config):
+    # Check embedding model compatibility or force recreation
+    if force_recreate:
+        print(f"🔄 Force recreating collection '{collection_name}' due to new file upload")
+        # Force backup and delete the collection
+        try:
+            existing_collection = chroma_client.get_collection(collection_name)
+            backup_and_recreate_collection(collection_name, embedding_config)
+        except Exception:
+            # Collection doesn't exist, which is fine
+            pass
+    elif not is_embedding_model_compatible(collection_name, embedding_config):
         print(f"🔄 Collection '{collection_name}' needs to be recreated due to embedding model change")
     
     # Prepare file info for parallel processing
@@ -708,7 +723,7 @@ def process_documents_for_collection(new_docs_dir: str, archive_dir: str, collec
     # Insert all chunks at once for better performance
     if all_chunks:
         print(f"\n💾 Inserting {len(all_chunks)} total chunks into collection '{collection_name}'...")
-        insert_into_chroma(collection_name, all_chunks, embedding_config)
+        insert_into_chroma(collection_name, all_chunks, embedding_config, force_recreate=force_recreate)
     else:
         print("⚠️  No chunks to insert")
 
