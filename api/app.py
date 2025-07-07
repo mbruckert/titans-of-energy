@@ -1,5 +1,15 @@
-from libraries.knowledgebase.preprocess import process_documents_for_collection
-from libraries.knowledgebase.retrieval import query_collection
+from libraries.knowledgebase.preprocess import (
+    process_documents_for_collection,
+    ensure_character_collections_compatible,
+    handle_character_embedding_model_change,
+    delete_character_collections,
+    rename_character_collections
+)
+from libraries.knowledgebase.retrieval import (
+    query_collection,
+    check_collection_compatibility,
+    get_collection_diagnostics
+)
 from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType, preload_llm_model, unload_all_cached_models, get_cached_models_info
 from libraries.llm.preprocess import download_model as download_model_func
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
@@ -459,19 +469,17 @@ def resolve_model_path(model_id: str) -> tuple[str, str]:
                     normalized_custom = custom_name.lower().replace('_', '-').replace('.', '-')
                     if normalized_dir == normalized_custom:
                         possible_dirs.append(dir_path)
-
-        # Check for directories (regular HF models)
-        possible_dirs = [
-            os.path.join(models_dir, custom_name),
-            os.path.join(models_dir, custom_name.replace('-', '_')),
-            os.path.join(models_dir, custom_name.replace(' ', '_')),
-            # Also check for the original directory name pattern (e.g., Llama_3.2)
-            os.path.join(models_dir, custom_name.replace('-', '_').replace('_', '.')),
-            os.path.join(models_dir, custom_name.replace('-', '.')),
-        ]
+                        print(f"Debug: Found matching directory: {dir_path}")
+                        
+        print(f"Debug: Looking for custom model '{custom_name}' in directories: {possible_dirs}")
+        print(f"Debug: Available directories in {models_dir}: {[d for d in os.listdir(models_dir) if os.path.isdir(os.path.join(models_dir, d))] if os.path.exists(models_dir) else 'models_dir does not exist'}")
+        
+        print(f"Debug: All possible directories to check: {possible_dirs}")
         
         for model_dir in possible_dirs:
+            print(f"Debug: Checking directory: {model_dir}")
             if os.path.exists(model_dir) and os.path.isdir(model_dir):
+                print(f"Debug: Found directory: {model_dir}")
                 # Check if there's a .huggingface_repo file that stores the original repo
                 repo_file = os.path.join(model_dir, '.huggingface_repo')
                 if os.path.exists(repo_file):
@@ -1186,6 +1194,22 @@ def create_character():
                     str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
                 
                 print(f"Successfully processed {len(kb_file_paths)} knowledge base files for {name}")
+                
+                # Ensure collection is compatible with embedding model
+                compatibility_result = ensure_character_collections_compatible(
+                    name,
+                    knowledge_base_embedding_config=knowledge_base_embedding_config,
+                    character_dir=str(character_dir)
+                )
+                
+                if compatibility_result["knowledge_base"]["checked"]:
+                    kb_result = compatibility_result["knowledge_base"]
+                    if kb_result.get("action") == "recreated":
+                        print(f"✅ Knowledge base collection automatically recreated with new embedding model")
+                    elif kb_result.get("action") == "failed":
+                        print(f"⚠️  Warning: Could not recreate knowledge base collection with new embedding model")
+                    elif kb_result.get("action") == "manual_required":
+                        print(f"⚠️  Warning: Knowledge base collection needs manual recreation")
             except Exception as e:
                 print(f"Warning: Knowledge base processing failed: {e}")
 
@@ -1303,6 +1327,22 @@ def create_character():
                     # Process the documents
                     process_documents_for_collection(
                         str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
+                    
+                    # Ensure collection is compatible with embedding model
+                    compatibility_result = ensure_character_collections_compatible(
+                        name,
+                        style_tuning_embedding_config=style_tuning_embedding_config,
+                        character_dir=str(character_dir)
+                    )
+                    
+                    if compatibility_result["style_tuning"]["checked"]:
+                        style_result = compatibility_result["style_tuning"]
+                        if style_result.get("action") == "recreated":
+                            print(f"✅ Style tuning collection automatically recreated with new embedding model")
+                        elif style_result.get("action") == "failed":
+                            print(f"⚠️  Warning: Could not recreate style tuning collection with new embedding model")
+                        elif style_result.get("action") == "manual_required":
+                            print(f"⚠️  Warning: Style tuning collection needs manual recreation")
                 except Exception as e:
                     print(f"Warning: Style tuning processing failed: {e}")
 
@@ -1616,10 +1656,29 @@ def load_character():
                     # First ensure the model is downloaded/available
                     success = ensure_model_available(needed_tts_model)
                     if success:
-                        # Use smart preloading to avoid unnecessary reloads
-                        print(
-                            f"Loading TTS model '{needed_tts_model}' into memory...")
-                        preload_models_smart([needed_tts_model])
+                        # Special handling for Zonos - preload persistent worker
+                        if needed_tts_model.lower() == 'zonos':
+                            try:
+                                from libraries.tts.inference import preload_zonos_worker
+                                voice_settings = character['voice_cloning_settings']
+                                zonos_model = voice_settings.get('zonos_model', 'Zyphra/Zonos-v0.1-transformer')
+                                device = voice_settings.get('torch_device', 'auto')
+                                
+                                print(f"🚀 Preloading Zonos worker for model: {zonos_model}")
+                                zonos_success = preload_zonos_worker(zonos_model, device)
+                                
+                                if zonos_success:
+                                    print(f"✓ Zonos worker preloaded successfully for {character_name}")
+                                    model_cache[f"{character_name}_zonos_ready"] = True
+                                else:
+                                    print(f"⚠ Warning: Zonos worker preload failed for {character_name}")
+                            except Exception as zonos_error:
+                                print(f"⚠ Warning: Zonos worker preload error for {character_name}: {zonos_error}")
+                        else:
+                            # Use smart preloading for other TTS models
+                            print(
+                                f"Loading TTS model '{needed_tts_model}' into memory...")
+                            preload_models_smart([needed_tts_model])
 
                         # Mark TTS model as ready for this character
                         model_cache[f"{character_name}_tts_ready"] = True
@@ -2680,6 +2739,16 @@ def delete_character(character_id):
 
         character_name = character['name']
 
+        # Delete associated collections
+        try:
+            collection_deletion_result = delete_character_collections(character_name)
+            if collection_deletion_result["knowledge_base"]["deleted"]:
+                print(f"✅ Deleted knowledge base collection for {character_name}")
+            if collection_deletion_result["style_tuning"]["deleted"]:
+                print(f"✅ Deleted style tuning collection for {character_name}")
+        except Exception as e:
+            print(f"Warning: Failed to delete character collections: {e}")
+
         # Delete associated files
         try:
             character_dir = STORAGE_DIR / \
@@ -2769,6 +2838,16 @@ def update_character(character_id):
                     f"Renamed character directory from {old_character_dir} to {new_character_dir}")
             else:
                 new_character_dir.mkdir(exist_ok=True)
+            
+            # Handle collection renaming when character name changes
+            try:
+                rename_result = rename_character_collections(old_name, new_name)
+                if rename_result["knowledge_base"]["renamed"]:
+                    print(f"✅ Renamed knowledge base collection for character name change")
+                if rename_result["style_tuning"]["renamed"]:
+                    print(f"✅ Renamed style tuning collection for character name change")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not rename collections for character name change: {e}")
         else:
             new_character_dir.mkdir(exist_ok=True)
 
@@ -2855,10 +2934,50 @@ def update_character(character_id):
                     str(kb_docs_dir), str(kb_archive_dir), collection_name, knowledge_base_embedding_config)
                 
                 print(f"✅ Successfully updated and processed {len(kb_file_paths)} knowledge base files for {new_name}")
+                
+                # Ensure collection is compatible with new embedding model
+                compatibility_result = ensure_character_collections_compatible(
+                    new_name,
+                    knowledge_base_embedding_config=knowledge_base_embedding_config,
+                    character_dir=str(new_character_dir)
+                )
+                
+                if compatibility_result["knowledge_base"]["checked"]:
+                    kb_result = compatibility_result["knowledge_base"]
+                    if kb_result.get("action") == "recreated":
+                        print(f"✅ Knowledge base collection automatically recreated with new embedding model")
+                    elif kb_result.get("action") == "failed":
+                        print(f"⚠️  Warning: Could not recreate knowledge base collection with new embedding model")
+                    elif kb_result.get("action") == "manual_required":
+                        print(f"⚠️  Warning: Knowledge base collection needs manual recreation")
             except Exception as e:
                 print(f"❌ Warning: Knowledge base processing failed: {e}")
         else:
             print(f"ℹ️  No new knowledge base files provided for {new_name} - keeping existing knowledge base")
+            
+            # Check if embedding model changed even without new files
+            old_kb_config = character.get('knowledge_base_embedding_config')
+            if old_kb_config != knowledge_base_embedding_config:
+                print(f"🔄 Knowledge base embedding model changed - checking compatibility...")
+                
+                try:
+                    embedding_change_result = handle_character_embedding_model_change(
+                        new_name,
+                        old_kb_config,
+                        knowledge_base_embedding_config,
+                        "knowledge",
+                        str(new_character_dir)
+                    )
+                    
+                    if embedding_change_result["success"]:
+                        if embedding_change_result["action"] == "recreated":
+                            print(f"✅ Knowledge base collection automatically recreated with new embedding model")
+                        elif embedding_change_result["action"] == "none":
+                            print(f"ℹ️  Knowledge base embedding model unchanged")
+                    else:
+                        print(f"⚠️  Warning: Could not handle knowledge base embedding model change: {embedding_change_result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"⚠️  Warning: Error checking knowledge base embedding model change: {e}")
 
         # Update voice cloning audio ONLY if new file is provided
         if 'voice_cloning_audio' in request.files:
@@ -2971,10 +3090,50 @@ def update_character(character_id):
                         str(style_docs_dir), str(style_archive_dir), collection_name, style_tuning_embedding_config)
                     
                     print(f"✅ Successfully updated and processed style tuning data for {new_name}")
+                    
+                    # Ensure collection is compatible with new embedding model
+                    compatibility_result = ensure_character_collections_compatible(
+                        new_name,
+                        style_tuning_embedding_config=style_tuning_embedding_config,
+                        character_dir=str(new_character_dir)
+                    )
+                    
+                    if compatibility_result["style_tuning"]["checked"]:
+                        style_result = compatibility_result["style_tuning"]
+                        if style_result.get("action") == "recreated":
+                            print(f"✅ Style tuning collection automatically recreated with new embedding model")
+                        elif style_result.get("action") == "failed":
+                            print(f"⚠️  Warning: Could not recreate style tuning collection with new embedding model")
+                        elif style_result.get("action") == "manual_required":
+                            print(f"⚠️  Warning: Style tuning collection needs manual recreation")
                 except Exception as e:
                     print(f"❌ Warning: Style tuning processing failed: {e}")
             else:
                 print(f"ℹ️  No new style tuning file provided for {new_name} - keeping existing style data")
+                
+                # Check if embedding model changed even without new files
+                old_style_config = character.get('style_tuning_embedding_config')
+                if old_style_config != style_tuning_embedding_config:
+                    print(f"🔄 Style tuning embedding model changed - checking compatibility...")
+                    
+                    try:
+                        embedding_change_result = handle_character_embedding_model_change(
+                            new_name,
+                            old_style_config,
+                            style_tuning_embedding_config,
+                            "style",
+                            str(new_character_dir)
+                        )
+                        
+                        if embedding_change_result["success"]:
+                            if embedding_change_result["action"] == "recreated":
+                                print(f"✅ Style tuning collection automatically recreated with new embedding model")
+                            elif embedding_change_result["action"] == "none":
+                                print(f"ℹ️  Style tuning embedding model unchanged")
+                        else:
+                            print(f"⚠️  Warning: Could not handle style tuning embedding model change: {embedding_change_result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"⚠️  Warning: Error checking style tuning embedding model change: {e}")
         else:
             print(f"ℹ️  No new style tuning file provided for {new_name} - keeping existing style data")
 
@@ -3434,6 +3593,190 @@ def unload_all_embedding_models():
     except Exception as e:
         print(f"Error unloading all embedding models: {e}")
         return jsonify({"error": "Failed to unload embedding models"}), 500
+
+
+@app.route('/preload-zonos-worker', methods=['POST'])
+def preload_zonos_worker_endpoint():
+    """
+    Preload a specific Zonos worker for faster subsequent generations.
+    Expects: {"model": str, "device": str}
+    """
+    try:
+        data = request.get_json()
+        model = data.get('model', 'Zyphra/Zonos-v0.1-transformer')
+        device = data.get('device', 'auto')
+
+        if not model:
+            return jsonify({"error": "model is required"}), 400
+
+        print(f"🚀 Preloading Zonos worker for model: {model}")
+
+        # Import the preload function
+        from libraries.tts.inference import preload_zonos_worker
+
+        # Preload the worker
+        success = preload_zonos_worker(model, device)
+
+        if success:
+            return jsonify({
+                "message": f"Zonos worker preloaded successfully for model: {model}",
+                "model": model,
+                "device": device,
+                "status": "success"
+            }), 200
+        else:
+            return jsonify({
+                "error": f"Failed to preload Zonos worker for model: {model}",
+                "model": model,
+                "device": device,
+                "status": "failed"
+            }), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get-zonos-worker-status', methods=['GET'])
+def get_zonos_worker_status_endpoint():
+    """
+    Get status of all persistent Zonos workers.
+    """
+    try:
+        from libraries.tts.inference import get_zonos_worker_status
+        
+        status = get_zonos_worker_status()
+        
+        return jsonify({
+            "status": status,
+            "success": True
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/cleanup-zonos-workers', methods=['POST'])
+def cleanup_zonos_workers_endpoint():
+    """
+    Clean up all persistent Zonos workers.
+    """
+    try:
+        from libraries.tts.inference import _cleanup_zonos_workers
+        
+        _cleanup_zonos_workers()
+        
+        return jsonify({
+            "message": "All Zonos workers cleaned up successfully",
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/check-collection-compatibility', methods=['POST'])
+def check_collection_compatibility_endpoint():
+    """
+    Check if a collection is compatible with the given embedding configuration.
+    
+    Expected JSON body:
+    {
+        "collection_name": "character_name",
+        "embedding_config": {
+            "model_type": "sentence_transformers",
+            "model_name": "all-MiniLM-L6-v2",
+            "model_id": "default",
+            "config": {}
+        }
+    }
+    
+    Returns:
+        JSON response with compatibility information
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No JSON data provided"
+            }), 400
+        
+        collection_name = data.get('collection_name')
+        embedding_config = data.get('embedding_config')
+        
+        if not collection_name:
+            return jsonify({
+                "success": False,
+                "error": "collection_name is required"
+            }), 400
+        
+        if not embedding_config:
+            return jsonify({
+                "success": False,
+                "error": "embedding_config is required"
+            }), 400
+        
+        # Check compatibility
+        compatibility_result = check_collection_compatibility(collection_name, embedding_config)
+        
+        return jsonify({
+            "success": True,
+            "compatibility": compatibility_result
+        })
+        
+    except Exception as e:
+        print(f"Error checking collection compatibility: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/get-collection-diagnostics', methods=['POST'])
+def get_collection_diagnostics_endpoint():
+    """
+    Get comprehensive diagnostic information about a collection.
+    
+    Expected JSON body:
+    {
+        "collection_name": "character_name"
+    }
+    
+    Returns:
+        JSON response with diagnostic information
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No JSON data provided"
+            }), 400
+        
+        collection_name = data.get('collection_name')
+        
+        if not collection_name:
+            return jsonify({
+                "success": False,
+                "error": "collection_name is required"
+            }), 400
+        
+        # Get diagnostics
+        diagnostics = get_collection_diagnostics(collection_name)
+        
+        return jsonify({
+            "success": True,
+            "diagnostics": diagnostics
+        })
+        
+    except Exception as e:
+        print(f"Error getting collection diagnostics: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 if __name__ == '__main__':

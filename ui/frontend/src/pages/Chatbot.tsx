@@ -106,6 +106,43 @@ const Chatbot = () => {
             setIsLoadingCharacter(true);
             setCharacterLoadingStatus("Loading character models...");
             
+            // First, fetch the character data to check if it uses Zonos
+            let character = null;
+            try {
+                const characterResponse = await fetch(`${API_BASE_URL}${API_ENDPOINTS.GET_CHARACTER}/${characterId}`);
+                if (characterResponse.ok) {
+                    const characterData = await characterResponse.json();
+                    if (characterData.status === 'success') {
+                        character = characterData.character;
+                    }
+                }
+            } catch (characterErr) {
+                console.warn('Failed to load character data:', characterErr);
+            }
+            
+            // Check if character uses Zonos and preload worker if needed
+            if (character) {
+                const { isZonosCharacter, preloadZonosWorker } = await import('../utils/zonosUtils');
+                
+                if (isZonosCharacter(character)) {
+                    setCharacterLoadingStatus("Preloading Zonos worker...");
+                    console.log('🚀 Character uses Zonos - preloading worker');
+                    
+                    try {
+                        const zonosSuccess = await preloadZonosWorker(character);
+                        if (zonosSuccess) {
+                            console.log('✅ Zonos worker preloaded successfully');
+                        } else {
+                            console.warn('⚠️ Zonos worker preload failed');
+                        }
+                    } catch (zonosErr) {
+                        console.warn('⚠️ Error preloading Zonos worker:', zonosErr);
+                    }
+                }
+            }
+            
+            setCharacterLoadingStatus("Loading other character models...");
+            
             const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOAD_CHARACTER}`, {
                 method: 'POST',
                 headers: {
