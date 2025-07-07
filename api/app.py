@@ -1110,6 +1110,8 @@ def create_character():
         llm_config = json.loads(request.form.get('llm_config', '{}'))
         voice_cloning_settings = json.loads(
             request.form.get('voice_cloning_settings', '{}'))
+        # Normalize voice cloning settings to ensure proper data types
+        voice_cloning_settings = normalize_voice_cloning_settings(voice_cloning_settings)
         wakeword = request.form.get('wakeword', f"hey {name.lower()}")
 
         # Get embedding configurations
@@ -2816,6 +2818,8 @@ def update_character(character_id):
             'llm_config', json.dumps(character['llm_config'] or {})))
         voice_cloning_settings = json.loads(request.form.get(
             'voice_cloning_settings', json.dumps(character['voice_cloning_settings'] or {})))
+        # Normalize voice cloning settings to ensure proper data types
+        voice_cloning_settings = normalize_voice_cloning_settings(voice_cloning_settings)
         wakeword = request.form.get('wakeword', character.get('wakeword', f"hey {new_name.lower()}"))
 
         # Get embedding configurations
@@ -4025,6 +4029,107 @@ def get_collection_diagnostics_endpoint():
             "success": False,
             "error": str(e)
         }), 500
+
+
+def normalize_voice_cloning_settings(settings: dict) -> dict:
+    """
+    Normalize voice cloning settings to ensure proper data types for TTS models.
+    This fixes issues where numeric values might be stored as strings.
+    """
+    if not settings:
+        return settings
+    
+    # Create a copy to avoid modifying the original
+    normalized = settings.copy()
+    
+    # XTTS-specific numeric conversions
+    xtts_numeric_fields = {
+        'repetition_penalty': float,
+        'top_k': int,
+        'top_p': float,
+        'speed': float,
+    }
+    
+    # Zonos-specific numeric conversions
+    zonos_numeric_fields = {
+        'seed': int,
+        'cfg_scale': float,
+        'speaking_rate': int,
+        'frequency_max': int,
+        'pitch_standard_deviation': int,
+        'e1': float,
+        'e2': float,
+        'e3': float,
+        'e4': float,
+        'e5': float,
+        'e6': float,
+        'e7': float,
+        'e8': float,
+    }
+    
+    # Audio preprocessing numeric conversions
+    preprocessing_numeric_fields = {
+        'top_db': float,
+        'fade_length_ms': int,
+    }
+    
+    # Apply conversions for all relevant fields
+    all_numeric_fields = {**xtts_numeric_fields, **zonos_numeric_fields, **preprocessing_numeric_fields}
+    
+    for field, conversion_func in all_numeric_fields.items():
+        if field in normalized and normalized[field] is not None:
+            try:
+                # Convert to proper type if it's not already the correct type
+                if isinstance(normalized[field], str) or (conversion_func == float and isinstance(normalized[field], int)) or (conversion_func == int and isinstance(normalized[field], float)):
+                    normalized[field] = conversion_func(normalized[field])
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not convert {field}={normalized[field]} to {conversion_func.__name__}: {e}")
+    
+    # Handle nested settings dictionaries (XTTS, F5, Zonos settings)
+    for settings_key in ['xtts_settings', 'f5_settings', 'zonos_settings']:
+        if settings_key in normalized and isinstance(normalized[settings_key], dict):
+            nested_settings = normalized[settings_key].copy()
+            
+            if settings_key == 'xtts_settings':
+                target_fields = xtts_numeric_fields
+            elif settings_key == 'zonos_settings':
+                target_fields = zonos_numeric_fields
+            else:  # f5_settings
+                target_fields = {}  # F5 doesn't have specific numeric fields yet
+            
+            for field, conversion_func in target_fields.items():
+                if field in nested_settings and nested_settings[field] is not None:
+                    try:
+                        if isinstance(nested_settings[field], str) or (conversion_func == float and isinstance(nested_settings[field], int)) or (conversion_func == int and isinstance(nested_settings[field], float)):
+                            nested_settings[field] = conversion_func(nested_settings[field])
+                    except (ValueError, TypeError) as e:
+                        print(f"Warning: Could not convert {settings_key}.{field}={nested_settings[field]} to {conversion_func.__name__}: {e}")
+            
+            normalized[settings_key] = nested_settings
+    
+    # Handle boolean conversions
+    boolean_fields = ['preprocess_audio', 'clean_audio', 'remove_silence', 'enhance_audio', 'skip_all_processing', 
+                     'bass_boost', 'treble_boost', 'compression', 'enable_text_splitting']
+    
+    for field in boolean_fields:
+        if field in normalized and normalized[field] is not None:
+            if isinstance(normalized[field], str):
+                normalized[field] = normalized[field].lower() in ('true', '1', 'yes', 'on')
+            elif not isinstance(normalized[field], bool):
+                normalized[field] = bool(normalized[field])
+    
+    # Handle nested boolean fields
+    for settings_key in ['xtts_settings', 'f5_settings', 'zonos_settings']:
+        if settings_key in normalized and isinstance(normalized[settings_key], dict):
+            nested_settings = normalized[settings_key]
+            for field in boolean_fields:
+                if field in nested_settings and nested_settings[field] is not None:
+                    if isinstance(nested_settings[field], str):
+                        nested_settings[field] = nested_settings[field].lower() in ('true', '1', 'yes', 'on')
+                    elif not isinstance(nested_settings[field], bool):
+                        nested_settings[field] = bool(nested_settings[field])
+    
+    return normalized
 
 
 if __name__ == '__main__':

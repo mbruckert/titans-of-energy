@@ -34,6 +34,7 @@ try:
 except ImportError:
     print("Warning: Device optimization not available. Using default configurations.")
     DEVICE_OPTIMIZATION_AVAILABLE = False
+    DeviceType = None
 
 # Global device info cache
 _device_type = None
@@ -70,6 +71,77 @@ _xtts_memory_usage = None
 # Zonos persistent worker management
 _zonos_workers = {}  # Dictionary to store persistent workers by character/model
 _zonos_worker_lock = None
+
+
+def normalize_tts_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize TTS configuration to ensure proper data types for all models.
+    This fixes issues where numeric values might be stored as strings.
+    """
+    if not config:
+        return config
+    
+    # Create a copy to avoid modifying the original
+    normalized = config.copy()
+    
+    # XTTS-specific numeric conversions
+    xtts_numeric_fields = {
+        'repetition_penalty': float,
+        'top_k': int,
+        'top_p': float,
+        'speed': float,
+    }
+    
+    # Zonos-specific numeric conversions
+    zonos_numeric_fields = {
+        'seed': int,
+        'cfg_scale': float,
+        'speaking_rate': int,
+        'frequency_max': int,
+        'pitch_standard_deviation': int,
+        'e1': float,
+        'e2': float,
+        'e3': float,
+        'e4': float,
+        'e5': float,
+        'e6': float,
+        'e7': float,
+        'e8': float,
+    }
+    
+    # Audio preprocessing numeric conversions
+    preprocessing_numeric_fields = {
+        'top_db': float,
+        'fade_length_ms': int,
+        'batch_size': int,
+    }
+    
+    # Apply conversions for all relevant fields
+    all_numeric_fields = {**xtts_numeric_fields, **zonos_numeric_fields, **preprocessing_numeric_fields}
+    
+    for field, conversion_func in all_numeric_fields.items():
+        if field in normalized and normalized[field] is not None:
+            try:
+                # Convert to proper type if it's not already the correct type
+                if isinstance(normalized[field], str) or (conversion_func == float and isinstance(normalized[field], int)) or (conversion_func == int and isinstance(normalized[field], float)):
+                    normalized[field] = conversion_func(normalized[field])
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not convert {field}={normalized[field]} to {conversion_func.__name__}: {e}")
+    
+    # Handle boolean conversions
+    boolean_fields = ['preprocess_audio', 'clean_audio', 'remove_silence', 'enhance_audio', 'skip_all_processing', 
+                     'bass_boost', 'treble_boost', 'compression', 'enable_text_splitting', 'use_mixed_precision',
+                     'memory_efficient', 'use_mps', 'mps_fallback', 'use_neural_engine', 'optimize_for_latency',
+                     'enable_flash_attention', 'compile_model', 'use_cuda_graphs', 'fast_mode']
+    
+    for field in boolean_fields:
+        if field in normalized and normalized[field] is not None:
+            if isinstance(normalized[field], str):
+                normalized[field] = normalized[field].lower() in ('true', '1', 'yes', 'on')
+            elif not isinstance(normalized[field], bool):
+                normalized[field] = bool(normalized[field])
+    
+    return normalized
 
 
 def _get_device_optimization():
@@ -507,6 +579,9 @@ def generate_audio(
     if config:
         default_config.update(config)
     config = default_config
+    
+    # Normalize config to ensure proper data types
+    config = normalize_tts_config(config)
 
     print(f"🔧 Final TTS Configuration:")
     for key, value in config.items():
