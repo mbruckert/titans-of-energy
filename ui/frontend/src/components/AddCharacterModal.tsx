@@ -109,7 +109,9 @@ const AddCharacterModal: React.FC<AddCharacterModalProps> = ({ isOpen, onClose, 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-gray-800 bg-opacity-20 flex items-center justify-center p-4 z-50">
+    <div className="fixed inset-0 flex items-center justify-center p-4 z-50"
+    style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+    >
       <div className="bg-white rounded-lg p-6 max-w-md w-full">
         <h2 className="text-2xl font-bold mb-4">Train New Character</h2>
         <form onSubmit={handleSubmit}>
