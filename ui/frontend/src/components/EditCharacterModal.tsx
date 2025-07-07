@@ -1,6 +1,6 @@
 import React, { useState, useEffect, ChangeEvent } from 'react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/api';
-import { GripVertical } from 'lucide-react';
+import { GripVertical, X } from 'lucide-react';
 import VectorModelSelector from './VectorModelSelector';
 
 interface Character {
@@ -596,12 +596,29 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     }
   };
 
+  const handleBackdropClick = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) {
+      onClose();
+    }
+  };
+
   if (!isOpen || !character) return null;
 
   return (
-    <div className="fixed inset-0 bg-gray-800 bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-gray-50 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <h2 className="text-2xl font-bold mb-4">Edit Character</h2>
+    <div 
+      className="fixed inset-0 flex items-center justify-center p-4 z-50"
+      style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+      onClick={handleBackdropClick}
+    >
+      <div className="bg-gray-50 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto relative">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 p-1 hover:bg-gray-200 rounded-full transition-colors"
+          type="button"
+        >
+          <X className="w-5 h-5 text-gray-500 hover:text-gray-700" />
+        </button>
+        <h2 className="text-2xl font-bold mb-4 pr-8">Edit Character</h2>
         
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
