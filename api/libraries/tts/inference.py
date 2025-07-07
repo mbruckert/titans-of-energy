@@ -185,6 +185,7 @@ def _get_device_optimization():
             print(
                 f"🎯 XTTS Mixed Precision: {_xtts_mixed_precision_enabled} (disabled for numerical stability)")
 
+
     return _device_type, _device_info
 
 

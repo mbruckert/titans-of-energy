@@ -4,6 +4,7 @@ import { Edit, Trash2, Mic } from 'lucide-react';
 interface CharacterCardProps {
   name: string;
   image: string;
+  id?: number | string;
   isAddButton?: boolean;
   onClick?: () => void;
   onEdit?: () => void;
@@ -14,6 +15,7 @@ interface CharacterCardProps {
 const CharacterCard: React.FC<CharacterCardProps> = ({ 
   name, 
   image, 
+  id,
   isAddButton = false, 
   onClick, 
   onEdit, 
@@ -43,6 +45,13 @@ const CharacterCard: React.FC<CharacterCardProps> = ({
         <h3 className="absolute bottom-4 left-4 text-white text-xl font-semibold">{name}</h3>
       
       </div>
+      
+      {/* Character ID badge */}
+      {id !== undefined && (
+        <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm text-white text-xs px-2 py-1 rounded-full font-medium z-10">
+          ID: {id}
+        </div>
+      )}
       
       {/* Click area for main action - positioned behind buttons */}
       <div 

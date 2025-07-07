@@ -18,7 +18,8 @@ services:
       context: ./api
       dockerfile: Dockerfile
       args:
-        ENABLE_GPU: ${ENABLE_GPU:-auto} # Can be overridden with environment variable
+        ENABLE_GPU: "false"  # CPU-only mode for compatibility
+        BASE_IMAGE: "ubuntu:22.04"  # Use standard Ubuntu for better compatibility
     depends_on:
       db:
         condition: service_healthy
@@ -39,13 +40,16 @@ services:
       # Override specific values from .env if needed
       DB_HOST: db
       PGHOST: db
-      # GPU support variables (only used when NVIDIA GPU is available)
-      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
-      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-      # Cache directories
+      # CPU-only mode (no GPU variables needed)
+      ENABLE_GPU: "false"
+      # Cache directories (works on all platforms)
       HF_HOME: /app/cache/huggingface
       TORCH_HOME: /app/cache/torch
       WHISPER_CACHE: /app/cache/whisper
+      TRANSFORMERS_CACHE: /app/cache/huggingface
+      HF_DATASETS_CACHE: /app/cache/huggingface
+      # Platform detection
+      DOCKER_PLATFORM: ${DOCKER_PLATFORM:-auto}
 
   frontend:
     build:
@@ -57,6 +61,7 @@ services:
       - NODE_ENV=development
     volumes:
       # Mount source code for hot reloading in development
+      # Note: Windows paths are handled automatically by Docker Desktop
       - ./ui/frontend/src:/app/src
       - ./ui/frontend/public:/app/public
       - ./ui/frontend/index.html:/app/index.html

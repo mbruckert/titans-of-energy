@@ -189,6 +189,7 @@ function CharacterSelection() {
           <CharacterCard
             key={character.id}
             name={character.name}
+            id={character.id}
             image={character.image_base64 || '/public/images/default-character.jpg'}
             onClick={() => handleCharacterClick(character)}
             onEdit={() => handleEditCharacter(character)}
