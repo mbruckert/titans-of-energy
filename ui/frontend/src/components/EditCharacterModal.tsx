@@ -69,8 +69,8 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
   const [isTranscribing, setIsTranscribing] = useState(false);
 
   // File upload state
-  const [knowledgeBaseFile, setKnowledgeBaseFile] = useState<File | null>(null);
-  const [styleTuningFile, setStyleTuningFile] = useState<File | null>(null);
+  const [knowledgeBaseFiles, setKnowledgeBaseFiles] = useState<File[]>([]);
+  const [styleTuningFiles, setStyleTuningFiles] = useState<File[]>([]);
 
   // Vector model configuration state
   const [knowledgeBaseEmbeddingConfig, setKnowledgeBaseEmbeddingConfig] = useState<VectorConfig>({
@@ -93,6 +93,13 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     hasStyleTuning: false
   });
 
+  // Track original configurations for change detection
+  const [originalConfigs, setOriginalConfigs] = useState({
+    knowledgeBaseEmbedding: null as VectorConfig | null,
+    styleTuningEmbedding: null as VectorConfig | null,
+    preprocessing: null as any
+  });
+
   // Voice cloning preprocessing configuration
   const [preprocessingConfig, setPreprocessingConfig] = useState({
     preprocess_audio: true,
@@ -108,12 +115,45 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
     compression: true
   });
 
+  // Model-specific settings with tracking of user modifications
+  const [f5Settings, setF5Settings] = useState({});
+  const [f5SettingsModified, setF5SettingsModified] = useState(new Set<string>());
+
+  const [xttsSettings, setXttsSettings] = useState({
+    language: 'en',
+    repetition_penalty: 1.0,
+    top_k: 50,
+    top_p: 0.8,
+    speed: 1.0,
+    enable_text_splitting: true
+  });
+  const [xttsSettingsModified, setXttsSettingsModified] = useState(new Set<string>());
+
+  const [zonosSettings, setZonosSettings] = useState({
+    e1: 0.5, // happiness
+    e2: 0.5, // sadness
+    e3: 0.5, // disgust
+    e4: 0.5, // fear
+    e5: 0.5, // surprise
+    e6: 0.5, // anger
+    e7: 0.5, // other
+    e8: 0.5, // neutral
+    seed: 42,
+    cfg_scale: 1.0,
+    speaking_rate: 20,
+    frequency_max: 12000,
+    pitch_standard_deviation: 100,
+    language: 'en'
+  });
+  const [zonosSettingsModified, setZonosSettingsModified] = useState(new Set<string>());
+
   // Drag and drop state for reordering
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
   const ttsModels = [
     { id: 'f5tts', name: 'F5-TTS' },
     { id: 'xtts', name: 'XTTS-v2' },
+    { id: 'zonos', name: 'Zonos-v0.1' },
   ];
 
   const processingSteps = [
@@ -253,8 +293,51 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                 treble_boost: fullCharacter.voice_cloning_settings.treble_boost ?? true,
                 compression: fullCharacter.voice_cloning_settings.compression ?? true
               });
+
+              // Load model-specific settings
+              if (fullCharacter.voice_cloning_settings.f5_settings) {
+                setF5Settings(fullCharacter.voice_cloning_settings.f5_settings);
+                if (fullCharacter.voice_cloning_settings.f5_settings_modified) {
+                  setF5SettingsModified(new Set(fullCharacter.voice_cloning_settings.f5_settings_modified));
+                }
+              }
+
+              if (fullCharacter.voice_cloning_settings.xtts_settings) {
+                setXttsSettings(prev => ({
+                  ...prev,
+                  ...fullCharacter.voice_cloning_settings.xtts_settings
+                }));
+                if (fullCharacter.voice_cloning_settings.xtts_settings_modified) {
+                  setXttsSettingsModified(new Set(fullCharacter.voice_cloning_settings.xtts_settings_modified));
+                }
+              }
+
+              if (fullCharacter.voice_cloning_settings.zonos_settings) {
+                setZonosSettings(prev => ({
+                  ...prev,
+                  ...fullCharacter.voice_cloning_settings.zonos_settings
+                }));
+                if (fullCharacter.voice_cloning_settings.zonos_settings_modified) {
+                  setZonosSettingsModified(new Set(fullCharacter.voice_cloning_settings.zonos_settings_modified));
+                }
+              }
             }
             setReferenceText(fullCharacter.voice_cloning_reference_text || '');
+            
+            // Set embedding configurations
+            if (fullCharacter.knowledge_base_embedding_config) {
+              setKnowledgeBaseEmbeddingConfig(fullCharacter.knowledge_base_embedding_config);
+            }
+            if (fullCharacter.style_tuning_embedding_config) {
+              setStyleTuningEmbeddingConfig(fullCharacter.style_tuning_embedding_config);
+            }
+            
+            // Store original configurations for change detection
+            setOriginalConfigs({
+              knowledgeBaseEmbedding: fullCharacter.knowledge_base_embedding_config || null,
+              styleTuningEmbedding: fullCharacter.style_tuning_embedding_config || null,
+              preprocessing: fullCharacter.voice_cloning_settings || null
+            });
           } else {
             // Fallback to basic character info
             setName(character.name);
@@ -295,17 +378,13 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
   };
 
   const handleKnowledgeBaseFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setKnowledgeBaseFile(file);
-    }
+    const files = Array.from(e.target.files || []);
+    setKnowledgeBaseFiles(files);
   };
 
   const handleStyleTuningFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setStyleTuningFile(file);
-    }
+    const files = Array.from(e.target.files || []);
+    setStyleTuningFiles(files);
   };
 
   const transcribeAudio = async () => {
@@ -352,6 +431,42 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
       ...prev,
       [key]: value
     }));
+  };
+
+  // Model-specific settings handlers
+  const handleF5SettingChange = (key: string, value: any) => {
+    setF5Settings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+    setF5SettingsModified(prev => new Set([...prev, key]));
+  };
+
+  const handleXttsSettingChange = (key: string, value: any) => {
+    setXttsSettings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+    setXttsSettingsModified(prev => new Set([...prev, key]));
+  };
+
+  const handleZonosSettingChange = (key: string, value: any) => {
+    setZonosSettings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+    setZonosSettingsModified(prev => new Set([...prev, key]));
+  };
+
+  // Function to filter settings to only include modified values
+  const getModifiedSettings = (settings: any, modifiedKeys: Set<string>) => {
+    const filtered: any = {};
+    for (const key of modifiedKeys) {
+      if (settings[key] !== undefined) {
+        filtered[key] = settings[key];
+      }
+    }
+    return filtered;
   };
 
   // Drag and drop handlers for reordering
@@ -416,7 +531,18 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
       }));
       formData.append('voice_cloning_settings', JSON.stringify({
         ...preprocessingConfig,
-        model: selectedTTSModel
+        model: selectedTTSModel,
+        // Always include all model-specific settings and their modification state
+        f5_settings: f5Settings,
+        f5_settings_modified: Array.from(f5SettingsModified),
+        xtts_settings: xttsSettings,
+        xtts_settings_modified: Array.from(xttsSettingsModified),
+        zonos_settings: zonosSettings,
+        zonos_settings_modified: Array.from(zonosSettingsModified),
+        // Also include the filtered settings for the current model
+        ...(selectedTTSModel === 'f5tts' && getModifiedSettings(f5Settings, f5SettingsModified)),
+        ...(selectedTTSModel === 'xtts' && getModifiedSettings(xttsSettings, xttsSettingsModified)),
+        ...(selectedTTSModel === 'zonos' && getModifiedSettings(zonosSettings, zonosSettingsModified))
       }));
       formData.append('voice_cloning_reference_text', referenceText);
 
@@ -427,12 +553,27 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
       if (voiceFile) {
         formData.append('voice_cloning_audio', voiceFile);
       }
-      if (knowledgeBaseFile) {
-        formData.append('knowledge_base_file', knowledgeBaseFile);
+      // Check if embedding configurations have changed
+      const hasKnowledgeBaseConfigChanged = JSON.stringify(knowledgeBaseEmbeddingConfig) !== JSON.stringify(originalConfigs.knowledgeBaseEmbedding);
+      const hasStyleTuningConfigChanged = JSON.stringify(styleTuningEmbeddingConfig) !== JSON.stringify(originalConfigs.styleTuningEmbedding);
+
+      if (knowledgeBaseFiles.length > 0) {
+        knowledgeBaseFiles.forEach(file => {
+          formData.append('knowledge_base_file', file);
+        });
+        formData.append('knowledge_base_embedding_config', JSON.stringify(knowledgeBaseEmbeddingConfig));
+      } else if (hasKnowledgeBaseConfigChanged) {
+        // Send embedding config even without new files if it changed
         formData.append('knowledge_base_embedding_config', JSON.stringify(knowledgeBaseEmbeddingConfig));
       }
-      if (styleTuningFile) {
-        formData.append('style_tuning_file', styleTuningFile);
+      
+      if (styleTuningFiles.length > 0) {
+        styleTuningFiles.forEach(file => {
+          formData.append('style_tuning_file', file);
+        });
+        formData.append('style_tuning_embedding_config', JSON.stringify(styleTuningEmbeddingConfig));
+      } else if (hasStyleTuningConfigChanged) {
+        // Send embedding config even without new files if it changed
         formData.append('style_tuning_embedding_config', JSON.stringify(styleTuningEmbeddingConfig));
       }
 
@@ -478,20 +619,47 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
         {!isLoadingCharacter && (
           <>
             {/* Update Summary */}
-            {(image || voiceFile || knowledgeBaseFile || styleTuningFile) && (
-              <div className="mb-6 p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-lg">
-                <h3 className="text-sm font-semibold text-amber-800 mb-2">📋 Changes Summary</h3>
-                <div className="text-sm text-amber-700 space-y-1">
-                  {image && <div>🔄 Character image will be replaced</div>}
-                  {voiceFile && <div>🔄 Voice audio will be replaced and re-processed</div>}
-                  {knowledgeBaseFile && <div>🔄 Knowledge base will be replaced and rebuilt</div>}
-                  {styleTuningFile && <div>🔄 Style tuning data will be replaced and rebuilt</div>}
-                  <div className="mt-2 pt-2 border-t border-amber-300 text-xs">
-                    💡 Files not selected above will remain unchanged
+            {(() => {
+              const hasKnowledgeBaseConfigChanged = JSON.stringify(knowledgeBaseEmbeddingConfig) !== JSON.stringify(originalConfigs.knowledgeBaseEmbedding);
+              const hasStyleTuningConfigChanged = JSON.stringify(styleTuningEmbeddingConfig) !== JSON.stringify(originalConfigs.styleTuningEmbedding);
+              const hasPreprocessingConfigChanged = JSON.stringify(preprocessingConfig) !== JSON.stringify(originalConfigs.preprocessing);
+              const hasModelSpecificSettingsChanged = f5SettingsModified.size > 0 || xttsSettingsModified.size > 0 || zonosSettingsModified.size > 0;
+              
+              const hasChanges = image || voiceFile || knowledgeBaseFiles.length > 0 || styleTuningFiles.length > 0 || 
+                                hasKnowledgeBaseConfigChanged || hasStyleTuningConfigChanged || hasPreprocessingConfigChanged || hasModelSpecificSettingsChanged;
+              
+              return hasChanges ? (
+                <div className="mb-6 p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-lg">
+                  <h3 className="text-sm font-semibold text-amber-800 mb-2">📋 Changes Summary</h3>
+                  <div className="text-sm text-amber-700 space-y-1">
+                    {image && <div>🔄 Character image will be replaced</div>}
+                    {voiceFile && <div>🔄 Voice audio will be replaced and re-processed</div>}
+                    {hasPreprocessingConfigChanged && !voiceFile && <div>⚙️ Voice preprocessing settings changed - existing audio will be re-processed</div>}
+                    {hasModelSpecificSettingsChanged && <div>🎛️ TTS model-specific settings changed</div>}
+                    {knowledgeBaseFiles.length > 0 && <div>🔄 Knowledge base will be replaced and rebuilt ({knowledgeBaseFiles.length} files)</div>}
+                    {hasKnowledgeBaseConfigChanged && knowledgeBaseFiles.length === 0 && <div>⚙️ Knowledge base embedding model changed - vector database will be recreated</div>}
+                    {styleTuningFiles.length > 0 && <div>🔄 Style tuning data will be replaced and rebuilt ({styleTuningFiles.length} files)</div>}
+                    {hasStyleTuningConfigChanged && styleTuningFiles.length === 0 && <div>⚙️ Style tuning embedding model changed - vector database will be recreated</div>}
+                    {(() => {
+                      const oldTTSModel = originalConfigs.preprocessing?.model || 'f5tts';
+                      const newTTSModel = selectedTTSModel;
+                      const oldReferenceText = character?.voice_cloning_reference_text || '';
+                      const newReferenceText = referenceText;
+                      
+                      const shouldRegenerateThinking = voiceFile || 
+                                                     hasPreprocessingConfigChanged || 
+                                                     oldTTSModel !== newTTSModel || 
+                                                     oldReferenceText !== newReferenceText;
+                      
+                      return shouldRegenerateThinking ? <div>🤔 Thinking audio will be regenerated</div> : null;
+                    })()}
+                    <div className="mt-2 pt-2 border-t border-amber-300 text-xs">
+                      💡 Items not listed above will remain unchanged
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              ) : null;
+            })()}
             
             <form onSubmit={handleSubmit} className="space-y-6">
             {/* Basic Info */}
@@ -947,6 +1115,366 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                   </div>
                 )}
               </div>
+
+              {/* Model-specific Settings */}
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4">
+                <h4 className="text-md font-semibold text-gray-900 mb-3">Model-specific Settings</h4>
+                
+                {/* F5-TTS Settings */}
+                {selectedTTSModel === 'f5tts' && (
+                  <div className="space-y-4">
+                    <p className="text-sm text-gray-600 mb-4">F5-TTS specific configuration options</p>
+                    <div className="bg-white p-4 rounded-lg border">
+                      <p className="text-sm text-gray-600">No additional configuration needed for F5-TTS.</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* XTTS-v2 Settings */}
+                {selectedTTSModel === 'xtts' && (
+                  <div className="space-y-4">
+                    <p className="text-sm text-gray-600 mb-4">XTTS-v2 specific configuration options</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Language
+                          {xttsSettingsModified.has('language') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </label>
+                        <select
+                          value={xttsSettings.language}
+                          onChange={(e) => handleXttsSettingChange('language', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                          <option value="en">English</option>
+                          <option value="es">Spanish</option>
+                          <option value="fr">French</option>
+                          <option value="de">German</option>
+                          <option value="it">Italian</option>
+                          <option value="pt">Portuguese</option>
+                          <option value="pl">Polish</option>
+                          <option value="tr">Turkish</option>
+                          <option value="ru">Russian</option>
+                          <option value="nl">Dutch</option>
+                          <option value="cs">Czech</option>
+                          <option value="ar">Arabic</option>
+                          <option value="zh-cn">Chinese (Simplified)</option>
+                          <option value="ja">Japanese</option>
+                          <option value="ko">Korean</option>
+                          <option value="hi">Hindi</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Repetition Penalty (0-10)
+                          {xttsSettingsModified.has('repetition_penalty') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </label>
+                        <input
+                          type="number"
+                          value={xttsSettings.repetition_penalty}
+                          onChange={(e) => handleXttsSettingChange('repetition_penalty', parseFloat(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="10"
+                          step="0.1"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Top K (0-100)
+                          {xttsSettingsModified.has('top_k') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </label>
+                        <input
+                          type="number"
+                          value={xttsSettings.top_k}
+                          onChange={(e) => handleXttsSettingChange('top_k', parseInt(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="100"
+                          step="1"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Top P (0-1)
+                          {xttsSettingsModified.has('top_p') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </label>
+                        <input
+                          type="number"
+                          value={xttsSettings.top_p}
+                          onChange={(e) => handleXttsSettingChange('top_p', parseFloat(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Speed (0-1)
+                          {xttsSettingsModified.has('speed') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </label>
+                        <input
+                          type="number"
+                          value={xttsSettings.speed}
+                          onChange={(e) => handleXttsSettingChange('speed', parseFloat(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="flex items-center">
+                        <input
+                          type="checkbox"
+                          checked={xttsSettings.enable_text_splitting}
+                          onChange={(e) => handleXttsSettingChange('enable_text_splitting', e.target.checked)}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span className="ml-2 text-sm font-medium text-gray-700">
+                          Enable text splitting
+                          {xttsSettingsModified.has('enable_text_splitting') && (
+                            <span className="ml-2 text-xs text-blue-600">(Modified)</span>
+                          )}
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {/* Zonos Settings */}
+                {selectedTTSModel === 'zonos' && (
+                  <div className="space-y-4">
+                    <p className="text-sm text-gray-600 mb-4">Zonos-v0.1 specific configuration options</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                        <select
+                          value={zonosSettings.language}
+                          onChange={(e) => handleZonosSettingChange('language', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                          <option value="en">English</option>
+                          <option value="es">Spanish</option>
+                          <option value="fr">French</option>
+                          <option value="de">German</option>
+                          <option value="it">Italian</option>
+                          <option value="pt">Portuguese</option>
+                          <option value="pl">Polish</option>
+                          <option value="tr">Turkish</option>
+                          <option value="ru">Russian</option>
+                          <option value="nl">Dutch</option>
+                          <option value="cs">Czech</option>
+                          <option value="ar">Arabic</option>
+                          <option value="zh-cn">Chinese</option>
+                          <option value="ja">Japanese</option>
+                          <option value="hu">Hungarian</option>
+                          <option value="ko">Korean</option>
+                          <option value="hi">Hindi</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Seed</label>
+                        <input
+                          type="number"
+                          value={zonosSettings.seed}
+                          onChange={(e) => handleZonosSettingChange('seed', parseInt(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">CFG Scale</label>
+                        <input
+                          type="number"
+                          value={zonosSettings.cfg_scale}
+                          onChange={(e) => handleZonosSettingChange('cfg_scale', parseFloat(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="10"
+                          step="0.1"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Speaking Rate (5-35)</label>
+                        <input
+                          type="number"
+                          value={zonosSettings.speaking_rate}
+                          onChange={(e) => handleZonosSettingChange('speaking_rate', parseInt(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="5"
+                          max="35"
+                          step="1"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Frequency Max (0-24000)</label>
+                        <input
+                          type="number"
+                          value={zonosSettings.frequency_max}
+                          onChange={(e) => handleZonosSettingChange('frequency_max', parseInt(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="24000"
+                          step="100"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Pitch Standard Deviation (0-500)</label>
+                        <input
+                          type="number"
+                          value={zonosSettings.pitch_standard_deviation}
+                          onChange={(e) => handleZonosSettingChange('pitch_standard_deviation', parseInt(e.target.value))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          min="0"
+                          max="500"
+                          step="10"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Emotion Parameters */}
+                    <div className="bg-white p-4 rounded-lg border">
+                      <h4 className="text-sm font-medium text-gray-700 mb-3">Emotion Parameters (0-1)</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Happiness (e1)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e1}
+                            onChange={(e) => handleZonosSettingChange('e1', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e1}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Sadness (e2)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e2}
+                            onChange={(e) => handleZonosSettingChange('e2', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e2}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Disgust (e3)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e3}
+                            onChange={(e) => handleZonosSettingChange('e3', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e3}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Fear (e4)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e4}
+                            onChange={(e) => handleZonosSettingChange('e4', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e4}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Surprise (e5)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e5}
+                            onChange={(e) => handleZonosSettingChange('e5', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e5}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Anger (e6)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e6}
+                            onChange={(e) => handleZonosSettingChange('e6', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e6}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Other (e7)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e7}
+                            onChange={(e) => handleZonosSettingChange('e7', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e7}</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Neutral (e8)</label>
+                          <input
+                            type="range"
+                            value={zonosSettings.e8}
+                            onChange={(e) => handleZonosSettingChange('e8', parseFloat(e.target.value))}
+                            className="w-full"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                          />
+                          <span className="text-xs text-gray-500">{zonosSettings.e8}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Additional Files */}
@@ -956,34 +1484,35 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
               {/* Knowledge Base Section */}
               <div className="mb-6">
                 <label htmlFor="knowledgeBase" className="block text-sm font-medium text-gray-700 mb-1">
-                  Knowledge Base File
+                  Knowledge Base Files
                 </label>
-                {currentFiles.hasKnowledgeBase && !knowledgeBaseFile && (
+                {currentFiles.hasKnowledgeBase && knowledgeBaseFiles.length === 0 && (
                   <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-sm text-blue-700">
                     ℹ️ Current knowledge base will be kept. Upload new files to replace and rebuild the knowledge base.
                   </div>
                 )}
-                {knowledgeBaseFile && (
+                {knowledgeBaseFiles.length > 0 && (
                   <div className="mb-2 p-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-700">
-                    🔄 New knowledge base file selected - will replace current knowledge base and rebuild when saved.
+                    🔄 {knowledgeBaseFiles.length} new knowledge base file(s) selected - will replace current knowledge base and rebuild when saved.
                   </div>
                 )}
                 <input
                   type="file"
                   id="knowledgeBase"
-                  accept=".txt,.pdf,.doc,.docx"
+                  accept=".txt,.pdf,.doc,.docx,.json"
                   onChange={handleKnowledgeBaseFileChange}
                   className="w-full mb-3"
+                  multiple
                   required={!currentFiles.hasKnowledgeBase}
                 />
-                {knowledgeBaseFile && (
+                {knowledgeBaseFiles.length > 0 && (
                   <div className="mt-1 mb-3 text-sm text-gray-600">
-                    Selected: {knowledgeBaseFile.name}
+                    Selected: {knowledgeBaseFiles.map(f => f.name).join(', ')}
                   </div>
                 )}
                 
                 {/* Knowledge Base Embedding Configuration */}
-                {(knowledgeBaseFile || currentFiles.hasKnowledgeBase) && (
+                {(knowledgeBaseFiles.length > 0 || currentFiles.hasKnowledgeBase) && (
                   <VectorModelSelector
                     label="Knowledge Base Embedding Model"
                     description="Configure the embedding model for processing knowledge base documents."
@@ -997,16 +1526,16 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
               {/* Style Tuning Section */}
               <div className="mb-4">
                 <label htmlFor="styleTuning" className="block text-sm font-medium text-gray-700 mb-1">
-                  Style Tuning File
+                  Style Tuning Files
                 </label>
-                {currentFiles.hasStyleTuning && !styleTuningFile && (
+                {currentFiles.hasStyleTuning && styleTuningFiles.length === 0 && (
                   <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-sm text-blue-700">
-                    ℹ️ Current style tuning data will be kept. Upload a new file to replace and rebuild the style database.
+                    ℹ️ Current style tuning data will be kept. Upload new files to replace and rebuild the style database.
                   </div>
                 )}
-                {styleTuningFile && (
+                {styleTuningFiles.length > 0 && (
                   <div className="mb-2 p-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-700">
-                    🔄 New style tuning file selected - will replace current style data and rebuild when saved.
+                    🔄 {styleTuningFiles.length} new style tuning file(s) selected - will replace current style data and rebuild when saved.
                   </div>
                 )}
                 <input
@@ -1015,16 +1544,17 @@ const EditCharacterModal: React.FC<EditCharacterModalProps> = ({
                   accept=".txt,.json,.yaml,.yml"
                   onChange={handleStyleTuningFileChange}
                   className="w-full mb-3"
+                  multiple
                   required={!currentFiles.hasStyleTuning}
                 />
-                {styleTuningFile && (
+                {styleTuningFiles.length > 0 && (
                   <div className="mt-1 mb-3 text-sm text-gray-600">
-                    Selected: {styleTuningFile.name}
+                    Selected: {styleTuningFiles.map(f => f.name).join(', ')}
                   </div>
                 )}
                 
                 {/* Style Tuning Embedding Configuration */}
-                {(styleTuningFile || currentFiles.hasStyleTuning) && (
+                {(styleTuningFiles.length > 0 || currentFiles.hasStyleTuning) && (
                   <VectorModelSelector
                     label="Style Tuning Embedding Model"
                     description="Configure the embedding model for processing style tuning data."

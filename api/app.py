@@ -1442,6 +1442,18 @@ def get_character(character_id):
         char_dict['has_style_tuning'] = bool(
             char_dict['style_tuning_data_path'])
 
+        # Add embedding configurations for editing
+        char_dict['knowledge_base_embedding_config'] = char_dict.get('knowledge_base_embedding_config') or {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+        char_dict['style_tuning_embedding_config'] = char_dict.get('style_tuning_embedding_config') or {
+            'model_type': 'sentence_transformers',
+            'model_name': 'all-MiniLM-L6-v2',
+            'config': {'device': 'auto'}
+        }
+
         # Remove sensitive file paths for security but keep the boolean flags
         char_dict.pop('image_path', None)
         char_dict.pop('knowledge_base_path', None)
@@ -2825,9 +2837,9 @@ def update_character(character_id):
         if not style_tuning_embedding_config:
             style_tuning_embedding_config = character.get('style_tuning_embedding_config') or default_embedding_config
 
-        # Extract reference text from voice cloning settings
-        voice_reference_text = voice_cloning_settings.get(
-            'reference_text', character.get('voice_cloning_reference_text', ''))
+        # Extract reference text from form data
+        voice_reference_text = request.form.get(
+            'voice_cloning_reference_text', character.get('voice_cloning_reference_text', ''))
 
         # Create new character directory if name changed
         new_character_dir = STORAGE_DIR / new_name.replace(' ', '_').lower()
@@ -2961,6 +2973,35 @@ def update_character(character_id):
                 print(f"🔄 Knowledge base embedding model changed - checking compatibility...")
                 
                 try:
+                    # Ensure kb_docs directory exists and has source files for recreation
+                    kb_docs_dir = new_character_dir / "kb_docs"
+                    kb_archive_dir = new_character_dir / "kb_archive"
+                    
+                    # Create directories if they don't exist
+                    kb_docs_dir.mkdir(exist_ok=True)
+                    kb_archive_dir.mkdir(exist_ok=True)
+                    
+                    # Check if kb_docs is empty and try to populate it from existing files
+                    if not any(kb_docs_dir.iterdir()):
+                        print(f"📂 kb_docs directory is empty, populating from existing knowledge base files...")
+                        
+                        # Look for existing knowledge base files in character directory
+                        kb_pattern = new_character_dir / "knowledge_base_*"
+                        import glob
+                        existing_kb_files = glob.glob(str(kb_pattern))
+                        
+                        if existing_kb_files:
+                            for kb_file_path in existing_kb_files:
+                                if os.path.exists(kb_file_path):
+                                    filename = os.path.basename(kb_file_path)
+                                    # Remove the "knowledge_base_N_" prefix to get original filename
+                                    original_filename = filename.split('_', 2)[-1] if '_' in filename else filename
+                                    dest_path = kb_docs_dir / original_filename
+                                    shutil.copy2(kb_file_path, dest_path)
+                                    print(f"📄 Copied {filename} to kb_docs for recreation")
+                        else:
+                            print(f"⚠️  No existing knowledge base files found for recreation")
+                    
                     embedding_change_result = handle_character_embedding_model_change(
                         new_name,
                         old_kb_config,
@@ -2979,7 +3020,47 @@ def update_character(character_id):
                 except Exception as e:
                     print(f"⚠️  Warning: Error checking knowledge base embedding model change: {e}")
 
-        # Update voice cloning audio ONLY if new file is provided
+        # Check if preprocessing settings have changed
+        old_voice_settings = character.get('voice_cloning_settings') or {}
+        preprocessing_changed = False
+        
+        # Compare preprocessing-related settings with proper defaults
+        preprocessing_keys = ['preprocess_audio', 'clean_audio', 'remove_silence', 'enhance_audio', 
+                             'skip_all_processing', 'preprocessing_order', 'top_db', 'fade_length_ms',
+                             'bass_boost', 'treble_boost', 'compression']
+        
+        # Define defaults to match what the frontend sends
+        preprocessing_defaults = {
+            'preprocess_audio': True,
+            'clean_audio': True,
+            'remove_silence': True,
+            'enhance_audio': True,
+            'skip_all_processing': False,
+            'preprocessing_order': ['clean', 'remove_silence', 'enhance'],
+            'top_db': 40.0,
+            'fade_length_ms': 50,
+            'bass_boost': True,
+            'treble_boost': True,
+            'compression': True
+        }
+        
+        for key in preprocessing_keys:
+            old_value = old_voice_settings.get(key, preprocessing_defaults.get(key))
+            new_value = voice_cloning_settings.get(key, preprocessing_defaults.get(key))
+            
+            # Special handling for preprocessing_order list comparison
+            if key == 'preprocessing_order':
+                if old_value != new_value:
+                    preprocessing_changed = True
+                    print(f"🔄 Preprocessing order changed: {old_value} → {new_value}")
+                    break
+            else:
+                if old_value != new_value:
+                    preprocessing_changed = True
+                    print(f"🔄 Preprocessing setting '{key}' changed: {old_value} → {new_value}")
+                    break
+
+        # Update voice cloning audio if new file is provided OR if preprocessing settings changed
         if 'voice_cloning_audio' in request.files:
             voice_file = request.files['voice_cloning_audio']
             if voice_file.filename:
@@ -3047,6 +3128,80 @@ def update_character(character_id):
                     print(f"ℹ️  Audio preprocessing disabled for {new_name} - using raw audio")
             else:
                 print(f"ℹ️  No new voice cloning audio provided for {new_name} - keeping existing audio")
+        elif preprocessing_changed and voice_cloning_audio_path and os.path.exists(voice_cloning_audio_path):
+            print(f"🔄 Voice preprocessing settings changed for {new_name} - reprocessing existing audio...")
+            
+            # Find the raw audio file to reprocess
+            raw_audio_path = None
+            character_dir_path = STORAGE_DIR / new_name.replace(' ', '_').lower()
+            
+            # Look for raw audio file
+            for file_pattern in ['voice_raw_*', 'voice_processed.wav']:
+                import glob
+                matching_files = glob.glob(str(character_dir_path / file_pattern))
+                if matching_files:
+                    # Use the first raw file found, or the processed file as fallback
+                    if 'raw' in file_pattern:
+                        raw_audio_path = matching_files[0]
+                        break
+                    elif not raw_audio_path:  # Use processed as fallback if no raw found
+                        raw_audio_path = matching_files[0]
+            
+            if raw_audio_path and os.path.exists(raw_audio_path):
+                # Check if audio preprocessing is enabled
+                preprocess_audio = voice_cloning_settings.get('preprocess_audio', True)
+
+                if preprocess_audio:
+                    try:
+                        # Filter out TTS-only parameters
+                        tts_only_params = {'model', 'cache_dir', 'preprocess_audio', 'ref_text', 'reference_text',
+                                           'language', 'output_dir', 'cuda_device', 'coqui_tos_agreed',
+                                           'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
+                                           'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
+                                           'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
+                        audio_processing_params = {
+                            k: v for k, v in voice_cloning_settings.items()
+                            if k not in tts_only_params
+                        }
+                        
+                        # Add device optimization for Apple Silicon
+                        if DEVICE_OPTIMIZATION_AVAILABLE:
+                            device_type, device_info = get_device_info()
+                            if device_type == DeviceType.APPLE_SILICON:
+                                print("🍎 Apple Silicon detected - enabling safe mode for audio preprocessing")
+                                audio_processing_params['safe_mode'] = True
+                        
+                        voice_cloning_audio_path = generate_reference_audio(
+                            raw_audio_path,
+                            output_file=str(character_dir_path / "voice_processed.wav"),
+                            **audio_processing_params
+                        )
+                        print(f"✅ Audio reprocessing completed for {new_name}")
+                    except Exception as e:
+                        print(f"❌ Warning: Voice reprocessing failed: {e}")
+                        print("🔄 Attempting fallback with safe mode...")
+                        try:
+                            # Retry with safe mode enabled
+                            audio_processing_params['safe_mode'] = True
+                            voice_cloning_audio_path = generate_reference_audio(
+                                raw_audio_path,
+                                output_file=str(character_dir_path / "voice_processed.wav"),
+                                **audio_processing_params
+                            )
+                            print(f"✅ Audio reprocessing completed for {new_name} with safe mode fallback")
+                        except Exception as fallback_error:
+                            print(f"❌ Warning: Voice reprocessing failed even with safe mode: {fallback_error}")
+                            # Keep existing audio path
+                else:
+                    # Copy raw audio as processed since preprocessing is disabled
+                    processed_path = str(character_dir_path / "voice_processed.wav")
+                    if raw_audio_path != processed_path:
+                        shutil.copy2(raw_audio_path, processed_path)
+                    voice_cloning_audio_path = processed_path
+                    print(f"ℹ️  Audio preprocessing disabled for {new_name} - using raw audio")
+            else:
+                print(f"⚠️  Could not find raw audio file to reprocess for {new_name}")
         else:
             print(f"ℹ️  No new voice cloning audio provided for {new_name} - keeping existing audio")
 
@@ -3117,6 +3272,35 @@ def update_character(character_id):
                     print(f"🔄 Style tuning embedding model changed - checking compatibility...")
                     
                     try:
+                        # Ensure style_docs directory exists and has source files for recreation
+                        style_docs_dir = new_character_dir / "style_docs"
+                        style_archive_dir = new_character_dir / "style_archive"
+                        
+                        # Create directories if they don't exist
+                        style_docs_dir.mkdir(exist_ok=True)
+                        style_archive_dir.mkdir(exist_ok=True)
+                        
+                        # Check if style_docs is empty and try to populate it from existing files
+                        if not any(style_docs_dir.iterdir()):
+                            print(f"📂 style_docs directory is empty, populating from existing style tuning files...")
+                            
+                            # Look for existing style tuning files in character directory
+                            style_pattern = new_character_dir / "style_tuning_*"
+                            import glob
+                            existing_style_files = glob.glob(str(style_pattern))
+                            
+                            if existing_style_files:
+                                for style_file_path in existing_style_files:
+                                    if os.path.exists(style_file_path):
+                                        filename = os.path.basename(style_file_path)
+                                        # Remove the "style_tuning_" prefix to get original filename
+                                        original_filename = filename.split('_', 2)[-1] if '_' in filename else filename
+                                        dest_path = style_docs_dir / original_filename
+                                        shutil.copy2(style_file_path, dest_path)
+                                        print(f"📄 Copied {filename} to style_docs for recreation")
+                            else:
+                                print(f"⚠️  No existing style tuning files found for recreation")
+                        
                         embedding_change_result = handle_character_embedding_model_change(
                             new_name,
                             old_style_config,
@@ -3136,6 +3320,70 @@ def update_character(character_id):
                         print(f"⚠️  Warning: Error checking style tuning embedding model change: {e}")
         else:
             print(f"ℹ️  No new style tuning file provided for {new_name} - keeping existing style data")
+
+        # Check if thinking audio needs to be regenerated
+        should_regenerate_thinking_audio = False
+        thinking_regeneration_reasons = []
+        
+        # Check if voice cloning model changed
+        old_voice_model = old_voice_settings.get('model', 'f5tts')
+        new_voice_model = voice_cloning_settings.get('model', 'f5tts')
+        if old_voice_model != new_voice_model:
+            should_regenerate_thinking_audio = True
+            thinking_regeneration_reasons.append(f"TTS model changed: {old_voice_model} → {new_voice_model}")
+        
+        # Check if new voice file was uploaded
+        if 'voice_cloning_audio' in request.files and request.files['voice_cloning_audio'].filename:
+            should_regenerate_thinking_audio = True
+            thinking_regeneration_reasons.append("New voice audio uploaded")
+        
+        # Check if preprocessing settings changed (and audio was reprocessed)
+        if preprocessing_changed:
+            should_regenerate_thinking_audio = True
+            thinking_regeneration_reasons.append("Voice preprocessing settings changed")
+        
+        # Check if reference text changed
+        old_reference_text = character.get('voice_cloning_reference_text', '')
+        new_reference_text = request.form.get('voice_cloning_reference_text', old_reference_text)
+        if old_reference_text != new_reference_text:
+            should_regenerate_thinking_audio = True
+            thinking_regeneration_reasons.append("Reference text changed")
+        
+        # Regenerate thinking audio if needed
+        if should_regenerate_thinking_audio and voice_cloning_audio_path and voice_cloning_settings:
+            print(f"🤔 Regenerating thinking audio for {new_name}...")
+            print(f"   Reasons: {', '.join(thinking_regeneration_reasons)}")
+            
+            # Check if thinking audio generation is enabled
+            generate_thinking_audio_enabled = os.getenv('GENERATE_THINKING_AUDIO', 'true').lower() == 'true'
+            
+            if generate_thinking_audio_enabled:
+                try:
+                    thinking_audio_base64 = generate_thinking_audio(
+                        new_name, voice_cloning_settings, voice_cloning_audio_path, new_reference_text
+                    )
+                    
+                    if thinking_audio_base64:
+                        # Update the character's thinking audio in the database
+                        conn_temp = get_db_connection()
+                        cur_temp = conn_temp.cursor()
+                        cur_temp.execute(
+                            "UPDATE characters SET thinking_audio_base64 = %s WHERE id = %s",
+                            (json.dumps(thinking_audio_base64), character_id)
+                        )
+                        conn_temp.commit()
+                        cur_temp.close()
+                        conn_temp.close()
+                        print(f"✅ Successfully regenerated thinking audio for {new_name}")
+                    else:
+                        print(f"⚠️  Thinking audio regeneration returned None for {new_name}")
+                except Exception as thinking_error:
+                    print(f"❌ Thinking audio regeneration failed for {new_name}: {thinking_error}")
+                    # Continue with character update even if thinking audio fails
+            else:
+                print(f"⏭️ Thinking audio generation disabled via environment variable for {new_name}")
+        elif should_regenerate_thinking_audio:
+            print(f"⚠️  Would regenerate thinking audio for {new_name}, but missing voice cloning settings or audio path")
 
         # Update paths if character directory was renamed
         if new_name != old_name:

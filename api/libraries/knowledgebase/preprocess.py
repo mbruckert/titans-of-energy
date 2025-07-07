@@ -1035,12 +1035,39 @@ def ensure_collection_compatible_with_embedding_model(
             collection_exists = False
         
         if not collection_exists:
-            return {
-                "exists": False,
-                "compatible": False,
-                "action": "none",
-                "message": f"Collection '{collection_name}' does not exist"
-            }
+            # Collection doesn't exist - try to create it from source documents
+            if source_documents_path and os.path.exists(source_documents_path):
+                print(f"🔄 Collection '{collection_name}' does not exist - creating from source documents")
+                
+                # Create the collection by processing source documents
+                try:
+                    process_documents_for_collection(
+                        source_documents_path,
+                        archive_path if archive_path else source_documents_path,
+                        collection_name,
+                        embedding_config
+                    )
+                    
+                    return {
+                        "exists": True,
+                        "compatible": True,
+                        "action": "created",
+                        "message": f"Collection '{collection_name}' created from source documents"
+                    }
+                except Exception as e:
+                    return {
+                        "exists": False,
+                        "compatible": False,
+                        "action": "failed",
+                        "message": f"Failed to create collection '{collection_name}': {e}"
+                    }
+            else:
+                return {
+                    "exists": False,
+                    "compatible": False,
+                    "action": "none",
+                    "message": f"Collection '{collection_name}' does not exist and no source documents available"
+                }
         
         # Check compatibility
         if is_embedding_model_compatible(collection_name, embedding_config):

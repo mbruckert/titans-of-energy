@@ -25,13 +25,12 @@ declare global {
 
 const VoiceCloningUpload = () => {
   const navigate = useNavigate();
-  const [files, setFiles] = useState<File[]>([]);
+  const [file, setFile] = useState<File | null>(null);
   const [referenceText, setReferenceText] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('f5tts');
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [transcribingFileIndex, setTranscribingFileIndex] = useState<number | null>(null);
 
   // Restore previous selections when component mounts
   useEffect(() => {
@@ -113,8 +112,8 @@ const VoiceCloningUpload = () => {
     
     // Restore files from global storage
     const files = getCharacterCreationFiles();
-    if (files.voiceCloningFiles) {
-      setFiles(files.voiceCloningFiles);
+    if (files.voiceCloningFiles && files.voiceCloningFiles.length > 0) {
+      setFile(files.voiceCloningFiles[0]); // Only take the first file
     }
   }, []);
   
@@ -184,99 +183,77 @@ const VoiceCloningUpload = () => {
     e.preventDefault();
     const droppedFiles = Array.from(e.dataTransfer.files);
     
-    // Validate file format and duration
-    const validFiles: File[] = [];
-    const invalidFiles: string[] = [];
+    // Only take the first file
+    const firstFile = droppedFiles[0];
+    if (!firstFile) return;
     
-    droppedFiles.forEach(file => {
-      // Check file format
-      if (!file.name.toLowerCase().endsWith('.wav')) {
-        invalidFiles.push(`${file.name}: Only WAV files are allowed`);
-        return;
+    // Check file format
+    if (!firstFile.name.toLowerCase().endsWith('.wav')) {
+      setError(`${firstFile.name}: Only WAV files are allowed`);
+      return;
+    }
+    
+    // Check file duration (we'll do this with audio element)
+    const audio = new Audio();
+    const objectUrl = URL.createObjectURL(firstFile);
+    
+    audio.onloadedmetadata = () => {
+      const duration = audio.duration;
+      if (duration < 5 || duration > 30) {
+        setError(`${firstFile.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
+      } else {
+        setFile(firstFile);
+        setError(null);
       }
-      
-      // Check file duration (we'll do this with audio element)
-      const audio = new Audio();
-      const objectUrl = URL.createObjectURL(file);
-      
-      audio.onloadedmetadata = () => {
-        const duration = audio.duration;
-        if (duration < 5 || duration > 30) {
-          invalidFiles.push(`${file.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
-        } else {
-          validFiles.push(file);
-        }
-        URL.revokeObjectURL(objectUrl);
-        
-        // Update files state after validation
-        if (validFiles.length > 0) {
-          setFiles(prevFiles => [...prevFiles, ...validFiles]);
-        }
-        
-        // Show error for invalid files
-        if (invalidFiles.length > 0) {
-          setError(invalidFiles.join(', '));
-        }
-      };
-      
-      audio.onerror = () => {
-        invalidFiles.push(`${file.name}: Could not read audio file`);
-        URL.revokeObjectURL(objectUrl);
-      };
-      
-      audio.src = objectUrl;
-    });
+      URL.revokeObjectURL(objectUrl);
+    };
+    
+    audio.onerror = () => {
+      setError(`${firstFile.name}: Could not read audio file`);
+      URL.revokeObjectURL(objectUrl);
+    };
+    
+    audio.src = objectUrl;
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || []);
     
-    // Validate file format and duration
-    const validFiles: File[] = [];
-    const invalidFiles: string[] = [];
+    // Only take the first file
+    const firstFile = selectedFiles[0];
+    if (!firstFile) return;
     
-    selectedFiles.forEach(file => {
-      // Check file format
-      if (!file.name.toLowerCase().endsWith('.wav')) {
-        invalidFiles.push(`${file.name}: Only WAV files are allowed`);
-        return;
+    // Check file format
+    if (!firstFile.name.toLowerCase().endsWith('.wav')) {
+      setError(`${firstFile.name}: Only WAV files are allowed`);
+      return;
+    }
+    
+    // Check file duration (we'll do this with audio element)
+    const audio = new Audio();
+    const objectUrl = URL.createObjectURL(firstFile);
+    
+    audio.onloadedmetadata = () => {
+      const duration = audio.duration;
+      if (duration < 5 || duration > 30) {
+        setError(`${firstFile.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
+      } else {
+        setFile(firstFile);
+        setError(null);
       }
-      
-      // Check file duration (we'll do this with audio element)
-      const audio = new Audio();
-      const objectUrl = URL.createObjectURL(file);
-      
-      audio.onloadedmetadata = () => {
-        const duration = audio.duration;
-        if (duration < 5 || duration > 30) {
-          invalidFiles.push(`${file.name}: Duration must be between 5-30 seconds (current: ${duration.toFixed(1)}s)`);
-        } else {
-          validFiles.push(file);
-        }
-        URL.revokeObjectURL(objectUrl);
-        
-        // Update files state after validation
-        if (validFiles.length > 0) {
-          setFiles(prevFiles => [...prevFiles, ...validFiles]);
-        }
-        
-        // Show error for invalid files
-        if (invalidFiles.length > 0) {
-          setError(invalidFiles.join(', '));
-        }
-      };
-      
-      audio.onerror = () => {
-        invalidFiles.push(`${file.name}: Could not read audio file`);
-        URL.revokeObjectURL(objectUrl);
-      };
-      
-      audio.src = objectUrl;
-    });
+      URL.revokeObjectURL(objectUrl);
+    };
+    
+    audio.onerror = () => {
+      setError(`${firstFile.name}: Could not read audio file`);
+      URL.revokeObjectURL(objectUrl);
+    };
+    
+    audio.src = objectUrl;
   };
 
-  const removeFile = (index: number) => {
-    setFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
+  const removeFile = () => {
+    setFile(null);
   };
 
   const handlePreprocessingChange = (key: string, value: any) => {
@@ -366,17 +343,15 @@ const VoiceCloningUpload = () => {
     return filtered;
   };
 
-  const transcribeAudio = async (fileIndex: number) => {
-    if (fileIndex < 0 || fileIndex >= files.length) return;
+  const transcribeAudio = async () => {
+    if (!file) return;
 
-    const fileToTranscribe = files[fileIndex];
-    setTranscribingFileIndex(fileIndex);
     setIsTranscribing(true);
     setError(null);
 
     try {
       const formData = new FormData();
-      formData.append('audio', fileToTranscribe);
+      formData.append('audio', file);
 
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TRANSCRIBE_AUDIO}`, {
         method: 'POST',
@@ -404,7 +379,6 @@ const VoiceCloningUpload = () => {
       setError(err instanceof Error ? err.message : 'Failed to transcribe audio');
     } finally {
       setIsTranscribing(false);
-      setTranscribingFileIndex(null);
     }
   };
 
@@ -443,7 +417,7 @@ const VoiceCloningUpload = () => {
       // Add voice cloning settings with preprocessing configuration
       const voiceSettings = {
         model: selectedModel,
-        ref_audio: files.length > 0 ? files[0] : null,
+        ref_audio: file ? file : null,
         ref_text: referenceText || 'Hello, how can I help you today?',
         ...preprocessingConfig,
         // Always include all model-specific settings and their modification state
@@ -474,8 +448,8 @@ const VoiceCloningUpload = () => {
       }
 
       // Add voice cloning audio files if available
-      if (files.length > 0) {
-        formData.append('voice_cloning_audio', files[0]);
+      if (file) {
+        formData.append('voice_cloning_audio', file);
       }
 
       // Add style tuning files if available
@@ -516,9 +490,9 @@ const VoiceCloningUpload = () => {
   // Save current progress before navigating
   const saveProgress = () => {
     // Store voice cloning files in global storage
-    if (files.length > 0) {
-      saveCharacterCreationFiles({ voiceCloningFiles: files });
-      console.log('Voice cloning files stored:', files.map(f => f.name));
+    if (file) {
+      saveCharacterCreationFiles({ voiceCloningFiles: [file] });
+      console.log('Voice cloning file stored:', file.name);
       console.log('Reference text:', referenceText);
     }
     
@@ -537,12 +511,12 @@ const VoiceCloningUpload = () => {
       // Also include the filtered settings for backward compatibility
       ...(selectedModel === 'f5tts' && getModifiedSettings(f5Settings, f5SettingsModified)),
       ...(selectedModel === 'xtts' && getModifiedSettings(xttsSettings, xttsSettingsModified)),
-              ...(selectedModel === 'zonos' && getModifiedSettings(zonosSettings, zonosSettingsModified))
+      ...(selectedModel === 'zonos' && getModifiedSettings(zonosSettings, zonosSettingsModified))
     };
 
     saveCharacterCreationData({
-      hasVoiceCloning: files.length > 0,
-      voiceCloningFileCount: files.length,
+      hasVoiceCloning: !!file,
+      voiceCloningFileCount: file ? 1 : 0,
       voice_cloning_settings: voiceSettings
     });
   };
@@ -625,7 +599,7 @@ const VoiceCloningUpload = () => {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
           </svg>
         </div>
-        <p className="text-gray-600 mb-2">Select your audio files or drag and drop</p>
+        <p className="text-gray-600 mb-2">Select your audio file or drag and drop</p>
         <p className="text-xs text-gray-500 mb-2">Accepted formats: WAV only</p> 
         <p className="text-xs text-gray-500 mb-4">Duration must be between 5-30 seconds for best results</p>
         <input
@@ -634,7 +608,6 @@ const VoiceCloningUpload = () => {
           className="hidden"
           onChange={handleFileSelect}
           accept=".wav"
-          multiple
         />
         <button
           onClick={() => document.getElementById('file-upload')?.click()}
@@ -642,25 +615,23 @@ const VoiceCloningUpload = () => {
         >
           Browse
         </button>
-        {files.length > 0 && (
-          <div className="mt-4 space-y-2">
-            {files.map((file, index) => (
-              <div key={index} className="flex items-center justify-between bg-gray-50 p-2 rounded">
-                <span className="text-sm truncate">{file.name}</span>
-                <button
-                  onClick={() => removeFile(index)}
-                  className="text-gray-500 hover:text-red-500"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
+        {file && (
+          <div className="mt-4">
+            <div className="flex items-center justify-between bg-gray-50 p-2 rounded">
+              <span className="text-sm truncate">{file.name}</span>
+              <button
+                onClick={removeFile}
+                className="text-gray-500 hover:text-red-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
       </div>
 
       {/* Reference Text */}
-      {files.length > 0 && (
+      {file && (
         <div className="mb-6">
           <label htmlFor="referenceText" className="block text-sm font-medium text-gray-700 mb-2">
             Reference Text (what is being said in the audio)
@@ -677,17 +648,17 @@ const VoiceCloningUpload = () => {
           {/* Transcription Helper */}
           <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <div className="flex items-center justify-between mb-2">
-              <h4 className="text-sm font-medium text-blue-900">🎤 Auto-transcribe Voice Files</h4>
+              <h4 className="text-sm font-medium text-blue-900">🎤 Auto-transcribe Voice File</h4>
               <span className="text-xs text-blue-600">Optional</span>
             </div>
             <p className="text-xs text-blue-700 mb-3">
-              Transcribe your uploaded voice files to automatically generate reference text. This can help create accurate text that matches your audio.
+              Transcribe your uploaded voice file to automatically generate reference text. This can help create accurate text that matches your audio.
             </p>
             
-            {files.length > 0 ? (
+            {file ? (
               <button
                 type="button"
-                onClick={() => transcribeAudio(0)}
+                onClick={transcribeAudio}
                 disabled={isTranscribing}
                 className="w-full py-2 px-3 bg-white text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors text-sm"
               >
@@ -702,7 +673,7 @@ const VoiceCloningUpload = () => {
               </button>
             ) : (
               <div className="text-xs text-gray-500 italic">
-                Upload voice files above to enable transcription
+                Upload a voice file above to enable transcription
               </div>
             )}
             
@@ -715,10 +686,10 @@ const VoiceCloningUpload = () => {
       )}
 
       {/* Audio Preprocessing Configuration */}
-      {files.length > 0 && (
+      {file && (
         <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Audio Preprocessing Settings</h3>
-          <p className="text-sm text-gray-600 mb-4">Configure how audio files are processed for voice cloning</p>
+          <p className="text-sm text-gray-600 mb-4">Configure how the audio file is processed for voice cloning</p>
           
           {/* Main preprocessing toggle */}
           <div className="mb-4">
@@ -910,7 +881,7 @@ const VoiceCloningUpload = () => {
       )}
 
       {/* Model-Specific Settings */}
-      {files.length > 0 && (
+      {file && (
         <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">{selectedModel.toUpperCase()} Model Settings</h3>
           <div className="flex justify-between items-center mb-4">
@@ -1319,9 +1290,9 @@ const VoiceCloningUpload = () => {
         <div className="space-x-2">
           <button
             onClick={handleSubmit}
-            disabled={isCreating || files.length === 0 || !referenceText.trim()}
+            disabled={isCreating || !file || !referenceText.trim()}
             className={`px-4 py-2 rounded-md ${
-              !isCreating && files.length > 0 && referenceText.trim()
+              !isCreating && file && referenceText.trim()
                 ? 'bg-black text-white hover:bg-gray-800'
                 : 'bg-gray-300 text-gray-500 cursor-not-allowed'
             }`}
