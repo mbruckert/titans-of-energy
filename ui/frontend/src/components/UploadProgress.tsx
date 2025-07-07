@@ -15,11 +15,10 @@ const UploadProgress: React.FC<UploadProgressProps> = ({ currentStep }) => {
     { label: 'Knowledge Base', isActive: currentStep === 2 },
     { label: 'Voice Cloning', isActive: currentStep === 3 },
     { label: 'Style Tuning', isActive: currentStep === 4 },
-    { label: 'TTS Config', isActive: currentStep === 5 }
   ];
 
   return (
-    <div className="fixed bottom-8 left-0 right-0">
+    <div className="mt-8 pt-8 border-t border-gray-200">
       <div className="flex justify-center items-center">
         <div className="flex items-center">
           {steps.map((step, index) => (

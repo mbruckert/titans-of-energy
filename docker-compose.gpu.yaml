@@ -1,0 +1,108 @@
+# Docker Compose override for NVIDIA GPU support
+# Use this file only on systems with NVIDIA GPUs and Docker GPU runtime
+# Usage: docker-compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
+#
+# PREREQUISITES:
+# 1. Install NVIDIA Container Runtime: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+# 2. Restart Docker daemon after installation
+# 3. Verify with: docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+#
+# TROUBLESHOOTING:
+# - If you get "could not select device driver nvidia" error:
+#   * Install nvidia-container-runtime: sudo apt-get install nvidia-container-runtime
+#   * Restart Docker: sudo systemctl restart docker
+#   * Or try legacy syntax: docker-compose -f docker-compose.yaml -f docker-compose.gpu-legacy.yaml up
+
+version: "3.8"
+
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: titans_user
+      POSTGRES_PASSWORD: titans_password
+      POSTGRES_DB: titans_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U titans_user -d titans_db"]
+      interval: 5s
+      retries: 5
+
+  app:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      args:
+        ENABLE_GPU: "true"
+        BASE_IMAGE: "nvidia/cuda:12.6-devel-ubuntu22.04"  # Use a known working CUDA tag
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    volumes:
+      # Persist ChromaDB database
+      - chroma_data:/app/chroma_db
+      # Persist storage directory (for audio files, etc.)
+      - storage_data:/app/storage
+      # Persist outputs directory (for generated content)
+      - outputs_data:/app/outputs
+      # Cache directories for better performance
+      - model_cache:/app/cache
+    env_file:
+      - .env
+    environment:
+      # Override specific values from .env if needed
+      DB_HOST: db
+      PGHOST: db
+      # GPU support variables (only used when NVIDIA GPU is available)
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      # Cache directories (works on both Linux and Windows)
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      WHISPER_CACHE: /app/cache/whisper
+      TRANSFORMERS_CACHE: /app/cache/huggingface
+      HF_DATASETS_CACHE: /app/cache/huggingface
+      # Platform detection
+      DOCKER_PLATFORM: ${DOCKER_PLATFORM:-linux}
+    # GPU runtime support for Docker Compose
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  frontend:
+    build:
+      context: ./ui/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      # Mount source code for hot reloading in development
+      # Note: Windows paths are handled automatically by Docker Desktop
+      - ./ui/frontend/src:/app/src
+      - ./ui/frontend/public:/app/public
+      - ./ui/frontend/index.html:/app/index.html
+      - ./ui/frontend/vite.config.ts:/app/vite.config.ts
+      - ./ui/frontend/tsconfig.json:/app/tsconfig.json
+      - ./ui/frontend/tsconfig.app.json:/app/tsconfig.app.json
+      - ./ui/frontend/tsconfig.node.json:/app/tsconfig.node.json
+      - ./ui/frontend/eslint.config.js:/app/eslint.config.js
+      # Exclude node_modules to avoid conflicts
+      - /app/node_modules
+    depends_on:
+      - app
+
+volumes:
+  db_data:
+  chroma_data:
+  storage_data:
+  outputs_data:
+  model_cache:

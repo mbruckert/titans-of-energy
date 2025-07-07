@@ -1,11 +1,48 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import UploadProgress from '../components/UploadProgress';
+import VectorModelSelector from '../components/VectorModelSelector';
 import { X } from 'lucide-react';
+import { 
+  getCharacterCreationData, 
+  saveCharacterCreationData, 
+  getCharacterCreationFiles, 
+  saveCharacterCreationFiles 
+} from '../utils/characterCreation';
+
+interface VectorConfig {
+  model_type: 'openai' | 'sentence_transformers';
+  model_name: string;
+  config: {
+    api_key?: string;
+    device?: string;
+  };
+}
 
 const KnowledgeBaseUpload = () => {
   const navigate = useNavigate();
   const [files, setFiles] = useState<File[]>([]);
+  const [embeddingConfig, setEmbeddingConfig] = useState<VectorConfig>({
+    model_type: 'sentence_transformers',
+    model_name: 'all-MiniLM-L6-v2',
+    config: { device: 'auto' }
+  });
+
+  // Restore previous selections when component mounts
+  useEffect(() => {
+    const existingData = getCharacterCreationData();
+    
+    // Restore embedding configuration
+    if (existingData.knowledgeBaseEmbeddingConfig) {
+      setEmbeddingConfig(existingData.knowledgeBaseEmbeddingConfig);
+    }
+    
+    // Restore files from global storage
+    const files = getCharacterCreationFiles();
+    if (files.knowledgeBaseFiles) {
+      setFiles(files.knowledgeBaseFiles);
+    }
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -22,10 +59,31 @@ const KnowledgeBaseUpload = () => {
     setFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
   };
 
+  // Save current progress before navigating
+  const saveProgress = () => {
+    // Store knowledge base files in global storage
+    if (files.length > 0) {
+      saveCharacterCreationFiles({ knowledgeBaseFiles: files });
+      console.log('Knowledge base files stored:', files.map(f => f.name));
+    }
+    
+    // Save knowledge base configuration
+    saveCharacterCreationData({
+      hasKnowledgeBase: files.length > 0,
+      knowledgeBaseFileCount: files.length,
+      knowledgeBaseEmbeddingConfig: embeddingConfig
+    });
+  };
+
   const handleSubmit = () => {
-    // file upload logic TODO
-    console.log('Uploading files:', files);
+    saveProgress();
     navigate('/voice-cloning');
+  };
+
+  const handleBack = () => {
+    // Save current progress before going back
+    saveProgress();
+    navigate('/model-selection');
   };
 
   return (
@@ -33,6 +91,22 @@ const KnowledgeBaseUpload = () => {
       <div className="text-center mb-8">
         <h1 className="text-2xl font-bold mb-2">Upload Knowledge Base</h1>
         <p className="text-gray-600">Upload documents to train your character's knowledge</p>
+        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <p className="text-sm text-blue-800">
+            💡 <strong>Tip:</strong> Upload text documents containing information about your character's life, background, experiences, and knowledge they should possess. This helps the AI respond authentically as your character.
+          </p>
+        </div>
+      </div>
+
+      {/* Vector Model Configuration */}
+      <div className="mb-6">
+        <VectorModelSelector
+          label="Knowledge Base Embedding Model"
+          description="Choose the embedding model for processing your knowledge base documents. OpenAI models offer higher quality but require an API key, while open source models are free and run locally."
+          value={embeddingConfig}
+          onChange={setEmbeddingConfig}
+          className="bg-gray-50"
+        />
       </div>
 
       <div 
@@ -46,6 +120,7 @@ const KnowledgeBaseUpload = () => {
           </svg>
         </div>
         <p className="text-gray-600 mb-2">Select your files or drag and drop</p>
+        <p className="text-xs text-gray-500 mb-4">Accepted formats: TXT, PDF, DOC, DOCX</p>
         <input
           type="file"
           id="file-upload"
@@ -77,21 +152,18 @@ const KnowledgeBaseUpload = () => {
         )}
       </div>
 
-      <div className="flex justify-end space-x-2">
+      <div className="flex justify-between">
         <button
-          onClick={() => navigate('/model-selection')}
+          onClick={handleBack}
           className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
         >
           Back
         </button>
         <button
           onClick={handleSubmit}
-          disabled={files.length === 0}
-          className={`px-4 py-2 rounded-md ${
-            files.length > 0 ? 'bg-black text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          }`}
+          className="px-4 py-2 bg-black text-white rounded-md hover:bg-gray-800"
         >
-          Upload
+          Continue
         </button>
       </div>
 
