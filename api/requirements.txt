@@ -28,6 +28,8 @@ huggingface-hub==0.32.3
 # GGUF model support (optional - may need special installation)
 llama-cpp-python==0.3.9
 
+resemblyzer
+
 # Speech-to-Text transcription
 sounddevice==0.5.2
 soundfile==0.13.1

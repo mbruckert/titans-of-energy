@@ -13,7 +13,7 @@ from libraries.knowledgebase.retrieval import (
 from libraries.llm.inference import generate_styled_text, get_style_data, load_model, ModelType, preload_llm_model, unload_all_cached_models, get_cached_models_info
 from libraries.llm.preprocess import download_model as download_model_func
 from libraries.tts.preprocess import generate_reference_audio, download_voice_models
-from libraries.tts.inference import generate_audio, ensure_model_available, unload_models, get_loaded_models, preload_models_smart, is_model_loaded
+from libraries.tts.inference import generate_audio, ensure_model_available, unload_models, get_loaded_models, preload_models_smart, is_model_loaded, generate_audio_with_similarity
 from libraries.utils.embedding_models import EmbeddingModelManager, embedding_manager
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
@@ -1008,6 +1008,16 @@ def init_db():
         print("Added embedding config columns (if not exists)")
     except Exception as e:
         print(f"Migration note: {e}")
+    
+    # Add similarity_score column to chat_history if it doesn't exist (migration)
+    try:
+        cur.execute("""
+            ALTER TABLE chat_history 
+            ADD COLUMN IF NOT EXISTS similarity_score REAL
+        """)
+        print("Added similarity_score column to chat_history (if not exists)")
+    except Exception as e:
+        print(f"Migration note: {e}")
 
     conn.commit()
     cur.close()
@@ -1866,14 +1876,6 @@ def ask_question_text():
         audio_generation_start = time.time()
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
-                # Check if we should use real-time optimized generation for high-end hardware
-                if DEVICE_OPTIMIZATION_AVAILABLE:
-                    device_type, device_info = get_device_info()
-                    use_realtime = (device_type == DeviceType.APPLE_SILICON and 
-                                   device_info.get('is_high_end', False))
-                else:
-                    use_realtime = False
-
                 voice_settings = character['voice_cloning_settings']
                 tts_model = voice_settings.get('model', 'f5tts')
 
@@ -1891,55 +1893,59 @@ def ask_question_text():
                 print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
                 print(f"   • Generation Text: {styled_response[:100]}{'...' if len(styled_response) > 100 else ''}")
                 print(f"   • Voice Settings: {voice_settings}")
-                print(f"   • Use Realtime: {use_realtime}")
 
-                if use_realtime:
-                    # Use real-time optimized generation for M4 Max and high-end hardware
-                    from libraries.tts.inference import generate_realtime_audio_base64
-                    print("🚀 Using real-time optimized TTS generation")
-                    
-                    audio_base64 = generate_realtime_audio_base64(
-                        model=tts_model,
-                        ref_audio=character['voice_cloning_audio_path'],
-                        ref_text=ref_text,
-                        gen_text=styled_response,
-                        config=voice_settings
-                    )
+                # Initialize similarity_score variable
+                similarity_score = None
+
+                # Always use similarity calculation method to ensure we get similarity scores
+                print("🎵 Using TTS generation with similarity calculation")
+                
+                # Generate audio with similarity calculation
+                generation_result = generate_audio_with_similarity(
+                    model=tts_model,
+                    ref_audio=character['voice_cloning_audio_path'],
+                    ref_text=ref_text,
+                    gen_text=styled_response,
+                    config=voice_settings,
+                    fast_mode=True,
+                    calculate_similarity=True
+                )
+                
+                # Extract audio path and similarity score
+                if generation_result and generation_result.get('audio_path'):
+                    # Convert audio file to base64
+                    from libraries.tts.inference import _audio_file_to_base64
+                    audio_base64 = _audio_file_to_base64(generation_result['audio_path'])
+                    similarity_score = generation_result.get('similarity_score')
+                    print(f"🎯 Similarity score calculated: {similarity_score}")
                 else:
-                    # Generate audio as base64 with optimized performance
-                    from libraries.tts.inference import generate_cloned_audio_base64
-                    print("🎵 Using standard optimized TTS generation")
-                    
-                    audio_base64 = generate_cloned_audio_base64(
-                        model=tts_model,
-                        ref_audio=character['voice_cloning_audio_path'],
-                        ref_text=ref_text,
-                        gen_text=styled_response,
-                        config=voice_settings
-                    )
+                    audio_base64 = None
+                    similarity_score = None
 
             except Exception as e:
                 print(f"Audio generation failed: {e}")
                 audio_base64 = None
+                similarity_score = None
 
         # Store chat history in database
         try:
             cur.execute("""
                 INSERT INTO chat_history 
-                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references, similarity_score)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 character_id,
                 question,
                 styled_response,
                 audio_base64,
                 knowledge_context,
-                json.dumps(knowledge_references)  # Store as JSON
+                json.dumps(knowledge_references),  # Store as JSON
+                similarity_score  # Add similarity score to database
             ))
             conn.commit()
         except Exception as e:
             print(f"Failed to store chat history: {e}")
-            # Try without knowledge_references column for backward compatibility
+            # Try without similarity_score and knowledge_references columns for backward compatibility
             try:
                 cur.execute("""
                     INSERT INTO chat_history 
@@ -1971,7 +1977,8 @@ def ask_question_text():
             "knowledge_references": knowledge_references,
             "character_name": character_name,
             "status": "success",
-            "audio_generation_time": round(audio_generation_time, 3)
+            "audio_generation_time": round(audio_generation_time, 3),
+            "similarity_score": similarity_score
         }
         
         print(f"🚀 Optimized response delivered for {character_name} - Audio gen: {audio_generation_time:.3f}s")
@@ -2157,14 +2164,6 @@ def ask_question_audio():
         audio_base64 = None
         if character['voice_cloning_audio_path'] and character['voice_cloning_settings']:
             try:
-                # Check if we should use real-time optimized generation for high-end hardware
-                if DEVICE_OPTIMIZATION_AVAILABLE:
-                    device_type, device_info = get_device_info()
-                    use_realtime = (device_type == DeviceType.APPLE_SILICON and 
-                                   device_info.get('is_high_end', False))
-                else:
-                    use_realtime = False
-
                 voice_settings = character['voice_cloning_settings']
                 tts_model = voice_settings.get('model', 'f5tts')
 
@@ -2182,55 +2181,59 @@ def ask_question_audio():
                 print(f"   • Reference Text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
                 print(f"   • Generation Text: {styled_response[:100]}{'...' if len(styled_response) > 100 else ''}")
                 print(f"   • Voice Settings: {voice_settings}")
-                print(f"   • Use Realtime: {use_realtime}")
 
-                if use_realtime:
-                    # Use real-time optimized generation for M4 Max and high-end hardware
-                    from libraries.tts.inference import generate_realtime_audio_base64
-                    print("🚀 Using real-time optimized TTS generation")
-                    
-                    audio_base64 = generate_realtime_audio_base64(
-                        model=tts_model,
-                        ref_audio=character['voice_cloning_audio_path'],
-                        ref_text=ref_text,
-                        gen_text=styled_response,
-                        config=voice_settings
-                    )
+                # Initialize similarity_score variable
+                similarity_score = None
+
+                # Always use similarity calculation method to ensure we get similarity scores
+                print("🎵 Using TTS generation with similarity calculation")
+                
+                # Generate audio with similarity calculation
+                generation_result = generate_audio_with_similarity(
+                    model=tts_model,
+                    ref_audio=character['voice_cloning_audio_path'],
+                    ref_text=ref_text,
+                    gen_text=styled_response,
+                    config=voice_settings,
+                    fast_mode=True,
+                    calculate_similarity=True
+                )
+                
+                # Extract audio path and similarity score
+                if generation_result and generation_result.get('audio_path'):
+                    # Convert audio file to base64
+                    from libraries.tts.inference import _audio_file_to_base64
+                    audio_base64 = _audio_file_to_base64(generation_result['audio_path'])
+                    similarity_score = generation_result.get('similarity_score')
+                    print(f"🎯 Similarity score calculated: {similarity_score}")
                 else:
-                    # Generate audio as base64 with optimized performance
-                    from libraries.tts.inference import generate_cloned_audio_base64
-                    print("🎵 Using standard optimized TTS generation")
-                    
-                    audio_base64 = generate_cloned_audio_base64(
-                        model=tts_model,
-                        ref_audio=character['voice_cloning_audio_path'],
-                        ref_text=ref_text,
-                        gen_text=styled_response,
-                        config=voice_settings
-                    )
+                    audio_base64 = None
+                    similarity_score = None
 
             except Exception as e:
                 print(f"Audio generation failed: {e}")
                 audio_base64 = None
+                similarity_score = None
 
         # Store chat history in database
         try:
             cur.execute("""
                 INSERT INTO chat_history 
-                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (character_id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references, similarity_score)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 character_id,
                 question,
                 styled_response,
                 audio_base64,
                 knowledge_context,
-                json.dumps(knowledge_references)  # Store as JSON
+                json.dumps(knowledge_references),  # Store as JSON
+                similarity_score  # Add similarity score to database
             ))
             conn.commit()
         except Exception as e:
             print(f"Failed to store chat history: {e}")
-            # Try without knowledge_references column for backward compatibility
+            # Try without similarity_score and knowledge_references columns for backward compatibility
             try:
                 cur.execute("""
                     INSERT INTO chat_history 
@@ -2258,7 +2261,8 @@ def ask_question_audio():
             "knowledge_context": knowledge_context,
             "knowledge_references": knowledge_references,
             "character_name": character_name,
-            "status": "success"
+            "status": "success",
+            "similarity_score": similarity_score
         }), 200
 
     except Exception as e:
@@ -2654,7 +2658,7 @@ def get_chat_history(character_id):
 
         # Get chat history
         cur.execute("""
-            SELECT id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references, created_at
+            SELECT id, user_message, bot_response, audio_base64, knowledge_context, knowledge_references, similarity_score, created_at
             FROM chat_history 
             WHERE character_id = %s 
             ORDER BY created_at DESC 

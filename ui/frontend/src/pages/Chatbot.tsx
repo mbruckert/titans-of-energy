@@ -34,6 +34,7 @@ interface Message {
     audioBase64?: string;
     id?: number;
     knowledgeReferences?: KnowledgeReference[];
+    similarityScore?: number;
 }
 
 const Chatbot = () => {
@@ -214,7 +215,8 @@ const Chatbot = () => {
                             timestamp: new Date(entry.created_at),
                             audioBase64: entry.audio_base64,
                             id: entry.id,
-                            knowledgeReferences: knowledgeRefs
+                            knowledgeReferences: knowledgeRefs,
+                            similarityScore: entry.similarity_score
                         });
                     });
                     setMessages(historyMessages);
@@ -298,6 +300,7 @@ const Chatbot = () => {
                     timestamp: new Date(),
                     audioBase64: data.audio_base64,
                     knowledgeReferences: data.knowledge_references || [],
+                    similarityScore: data.similarity_score
                 };
                 
                 // Debug logging for audio issues
@@ -752,6 +755,13 @@ const Chatbot = () => {
                                                 <div className="flex items-center space-x-1">
                                                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                                                     <span className="text-xs text-green-600">Playing</span>
+                                                </div>
+                                            )}
+                                            {message.similarityScore !== undefined && message.similarityScore !== null && (
+                                                <div className="flex items-center space-x-1">
+                                                    <span className="text-xs text-gray-500">
+                                                        Audio similarity to real recording: {(message.similarityScore * 100).toFixed(1)}%
+                                                    </span>
                                                 </div>
                                             )}
                                             <button

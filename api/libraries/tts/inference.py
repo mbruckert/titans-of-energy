@@ -1904,3 +1904,143 @@ def get_zonos_worker_status() -> Dict[str, Any]:
             }
         
         return status
+
+
+def calculate_audio_similarity(reference_audio_path: str, generated_audio_path: str) -> Optional[float]:
+    """
+    Calculate similarity score between reference audio and generated audio using voice embeddings.
+    
+    Args:
+        reference_audio_path: Path to the reference audio file
+        generated_audio_path: Path to the generated audio file
+    
+    Returns:
+        Similarity score between 0 and 1, or None if calculation fails
+    """
+    try:
+        # Import resemblyzer for voice similarity calculation
+        from resemblyzer import VoiceEncoder, preprocess_wav
+        import numpy as np
+        
+        print(f"🔍 Calculating audio similarity:")
+        print(f"   • Reference: {reference_audio_path}")
+        print(f"   • Generated: {generated_audio_path}")
+        
+        # Verify both files exist
+        if not os.path.exists(reference_audio_path):
+            print(f"❌ Reference audio file not found: {reference_audio_path}")
+            return None
+            
+        if not os.path.exists(generated_audio_path):
+            print(f"❌ Generated audio file not found: {generated_audio_path}")
+            return None
+        
+        # Initialize the voice encoder
+        encoder = VoiceEncoder()
+        
+        # Process the reference audio
+        ref_wav = preprocess_wav(reference_audio_path)
+        ref_embedding = encoder.embed_utterance(ref_wav)
+        
+        # Process the generated audio
+        gen_wav = preprocess_wav(generated_audio_path)
+        gen_embedding = encoder.embed_utterance(gen_wav)
+        
+        # Calculate cosine similarity between embeddings
+        similarity = np.dot(ref_embedding, gen_embedding) / (
+            np.linalg.norm(ref_embedding) * np.linalg.norm(gen_embedding)
+        )
+        
+        # Ensure the similarity score is within [0, 1] range
+        similarity = max(0.0, min(1.0, float(similarity)))
+        
+        print(f"✓ Audio similarity calculated: {similarity:.4f}")
+        return similarity
+        
+    except ImportError:
+        print("⚠️  Resemblyzer not available for audio similarity calculation")
+        print("Install with: pip install resemblyzer")
+        return None
+    except Exception as e:
+        print(f"❌ Error calculating audio similarity: {str(e)}")
+        return None
+
+
+def generate_audio_with_similarity(
+    model: str,
+    ref_audio: str,
+    ref_text: str,
+    gen_text: str,
+    config: Optional[Dict[str, Any]] = None,
+    auto_download: bool = True,
+    fast_mode: bool = False,
+    calculate_similarity: bool = True
+) -> Dict[str, Any]:
+    """
+    Generate cloned audio and calculate similarity score with the reference audio.
+    
+    Args:
+        model: Model name/path
+        ref_audio: Path to reference audio file
+        ref_text: Reference text
+        gen_text: Text to generate with cloned voice
+        config: Additional configuration parameters
+        auto_download: Whether to automatically download model if not available
+        fast_mode: Enable real-time optimizations
+        calculate_similarity: Whether to calculate similarity score
+    
+    Returns:
+        Dictionary containing:
+        - 'audio_path': Path to generated audio file
+        - 'similarity_score': Similarity score (0-1) or None if calculation failed
+        - 'generation_time': Time taken to generate audio in seconds
+    """
+    print(f"🎵 TTS Audio Generation with Similarity Analysis:")
+    print(f"   • Model: {model}")
+    print(f"   • Reference Audio: {ref_audio}")
+    print(f"   • Calculate Similarity: {calculate_similarity}")
+    
+    start_time = time.perf_counter()
+    
+    # Generate the audio using existing function
+    try:
+        audio_path = generate_audio(
+            model=model,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            gen_text=gen_text,
+            config=config,
+            auto_download=auto_download,
+            fast_mode=fast_mode
+        )
+        
+        generation_time = time.perf_counter() - start_time
+        
+        # Calculate similarity if requested and audio was generated successfully
+        similarity_score = None
+        if calculate_similarity and audio_path and os.path.exists(audio_path):
+            similarity_start = time.perf_counter()
+            similarity_score = calculate_audio_similarity(ref_audio, audio_path)
+            similarity_time = time.perf_counter() - similarity_start
+            print(f"✓ Similarity calculation completed in {similarity_time:.3f}s")
+        
+        result = {
+            'audio_path': audio_path,
+            'similarity_score': similarity_score,
+            'generation_time': generation_time
+        }
+        
+        print(f"✓ Audio generation with similarity analysis completed")
+        print(f"   • Generation Time: {generation_time:.3f}s")
+        if similarity_score is not None:
+            print(f"   • Similarity Score: {similarity_score:.4f}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"❌ Audio generation with similarity failed: {str(e)}")
+        return {
+            'audio_path': None,
+            'similarity_score': None,
+            'generation_time': time.perf_counter() - start_time
+        }
