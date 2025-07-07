@@ -30,6 +30,11 @@ export const API_ENDPOINTS = {
   UNLOAD_LLM_MODELS: '/unload-llm-models',
   UNLOAD_ALL_MODELS: '/unload-all-models',
   
+  // Zonos worker endpoints
+  PRELOAD_ZONOS_WORKER: '/preload-zonos-worker',
+  GET_ZONOS_WORKER_STATUS: '/get-zonos-worker-status',
+  CLEANUP_ZONOS_WORKERS: '/cleanup-zonos-workers',
+  
   // File serving endpoints
   SERVE_AUDIO: '/serve-audio',
   SERVE_IMAGE: '/serve-image'
