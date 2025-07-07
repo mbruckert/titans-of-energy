@@ -132,8 +132,72 @@ except Exception as e:
     exit(1)
 
 # Helper functions
+def phonetic_similarity(word1, word2):
+    """Basic phonetic similarity check"""
+    if not word1 or not word2:
+        return False
+    
+    # Exact match
+    if word1 == word2:
+        return True
+    
+    # Length similarity (within 2 characters)
+    if abs(len(word1) - len(word2)) > 2:
+        return False
+    
+    # Check if they start with the same sound
+    if word1[0] == word2[0]:
+        # If short words, check if most characters match
+        if len(word1) <= 3 or len(word2) <= 3:
+            common_chars = sum(1 for i in range(min(len(word1), len(word2))) if word1[i] == word2[i])
+            return common_chars >= min(len(word1), len(word2)) - 1
+        
+        # For longer words, check if first 2-3 characters match
+        prefix_len = min(3, len(word1), len(word2))
+        if word1[:prefix_len] == word2[:prefix_len]:
+            return True
+    
+    # Check common phonetic substitutions
+    phonetic_map = {
+        'f': ['ph', 'v'],
+        'v': ['f', 'ph'],
+        'c': ['k', 's'],
+        'k': ['c'],
+        's': ['z', 'c'],
+        'z': ['s'],
+        'i': ['y', 'e'],
+        'y': ['i'],
+        'e': ['i'],
+        'er': ['ur', 'or'],
+        'ur': ['er', 'or'],
+        'or': ['er', 'ur']
+    }
+    
+    # Simple substitution check
+    for char, substitutes in phonetic_map.items():
+        if char in word1:
+            for sub in substitutes:
+                if word1.replace(char, sub) == word2:
+                    return True
+        if char in word2:
+            for sub in substitutes:
+                if word2.replace(char, sub) == word1:
+                    return True
+    
+    return False
+
+def extract_name_from_wakeword(wakeword):
+    """Extract the name part from a wakeword like 'hey fermi' -> 'fermi'"""
+    words = wakeword.lower().split()
+    # Skip common greeting words
+    greetings = ['hey', 'hi', 'hello', 'ok', 'okay']
+    for word in words:
+        if word not in greetings and len(word) > 1:
+            return word
+    return words[-1] if words else ""
+
 def check_for_wakeword(text):
-    """Check if wakeword is in text with fuzzy matching"""
+    """Check if wakeword is in text with generic fuzzy matching"""
     text_lower = text.lower().strip()
     
     # Direct pattern matching
@@ -141,21 +205,47 @@ def check_for_wakeword(text):
         if pattern in text_lower:
             return True, pattern
     
-    # Fuzzy matching for common transcription errors
+    # Generic fuzzy matching for any character name
     words = text_lower.split()
     if len(words) >= 1:
-        # Check for "oppenheimer" variations
-        for word in words:
-            if ("oppen" in word and len(word) > 4) or \
-               ("open" in word and "heim" in word) or \
-               (word.startswith("op") and "heim" in word):
-                return True, word
+        # Extract the actual name from our wakeword patterns
+        target_names = []
+        for pattern in WAKEWORD_PATTERNS:
+            name = extract_name_from_wakeword(pattern)
+            if name:
+                target_names.append(name)
         
-        # Check for "hey" + name combinations
+        # Check each word in the transcript against target names
+        for word in words:
+            for target_name in target_names:
+                if phonetic_similarity(word, target_name):
+                    return True, f"{word} (similar to {target_name})"
+        
+        # Check greeting + name combinations
+        greetings = ["hey", "hi", "hello", "ok", "okay"]
         for i in range(len(words) - 1):
-            if words[i] in ["hey", "hi", "hello"] and \
-               ("oppen" in words[i+1] or "open" in words[i+1]):
-                return True, f"{words[i]} {words[i+1]}"
+            if words[i] in greetings:
+                next_word = words[i+1]
+                for target_name in target_names:
+                    if phonetic_similarity(next_word, target_name):
+                        return True, f"{words[i]} {next_word} (similar to {words[i]} {target_name})"
+        
+        # Check for multi-word phrases that might be misheard as names
+        # Example: "for me" -> "fermi", "open timer" -> "oppenheimer"
+        if len(words) >= 2:
+            # Join consecutive words and check similarity
+            for i in range(len(words) - 1):
+                combined = words[i] + words[i+1]  # "for" + "me" = "forme"
+                for target_name in target_names:
+                    if phonetic_similarity(combined, target_name):
+                        return True, f"{words[i]} {words[i+1]} (sounds like {target_name})"
+        
+        # Check for three-word phrases in greeting context
+        if len(words) >= 3 and words[0] in greetings:
+            combined = words[1] + words[2]  # "for" + "me" = "forme"
+            for target_name in target_names:
+                if phonetic_similarity(combined, target_name):
+                    return True, f"{words[0]} {words[1]} {words[2]} (sounds like {words[0]} {target_name})"
     
     return False, None
 
@@ -506,6 +596,76 @@ def callback(indata, frames, time_info, status):
     except Exception as e:
         print(f"❌ Callback error: {e}")
 
+# Load character models and fetch wakeword
+def load_character_models(character_id):
+    """Load character models for optimal performance"""
+    print(f"🚀 Loading character models for character {character_id}...")
+    
+    try:
+        # First, fetch the character data to check if it uses Zonos
+        character = None
+        try:
+            response = requests.get(f"{api_base_url}/get-character/{character_id}", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    character = data.get('character')
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load character data: {e}")
+        
+        # Check if character uses Zonos and preload worker if needed
+        if character:
+            # Simple check for Zonos usage - look for zonos in tts_model field
+            tts_model = character.get('tts_model', '').lower()
+            if 'zonos' in tts_model:
+                print("🔧 Character uses Zonos - preloading worker...")
+                try:
+                    preload_response = requests.post(f"{api_base_url}/preload-zonos-worker", 
+                                                   json={"character": character}, 
+                                                   timeout=30)
+                    if preload_response.status_code == 200:
+                        preload_data = preload_response.json()
+                        if preload_data.get('status') == 'success':
+                            print("✅ Zonos worker preloaded successfully")
+                        else:
+                            print("⚠️ Zonos worker preload failed")
+                    else:
+                        print("⚠️ Zonos worker preload request failed")
+                except Exception as e:
+                    print(f"⚠️ Error preloading Zonos worker: {e}")
+        
+        # Load other character models (LLM, embeddings, etc.)
+        print("📦 Loading LLM and embedding models...")
+        try:
+            load_response = requests.post(f"{api_base_url}/load-character",
+                                        json={"character_id": character_id},
+                                        timeout=60)
+            if load_response.status_code == 200:
+                load_data = load_response.json()
+                if load_data.get('status') == 'success':
+                    print("✅ Character models loaded successfully")
+                    if 'loaded_models' in load_data:
+                        loaded_models = load_data['loaded_models']
+                        print(f"📊 Loaded models: {', '.join(loaded_models)}")
+                else:
+                    print(f"⚠️ Model loading response: {load_data.get('message', 'Unknown error')}")
+            else:
+                print("⚠️ Failed to preload character models - performance may be slower")
+        except Exception as e:
+            print(f"⚠️ Error loading character models: {e}")
+            print("⚠️ Models not preloaded - performance may be slower")
+        
+        print("🎯 Character preparation complete!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error during character model loading: {e}")
+        print("⚠️ Continuing without model preloading - performance may be slower")
+        return False
+
+# Load character models first
+load_character_models(character_id)
+
 # Fetch character's wakeword and setup patterns
 print(f"🔄 Fetching wakeword for character {character_id}...")
 character_wakeword = fetch_character_wakeword(character_id)
@@ -526,6 +686,7 @@ print(f"🔊 Volume threshold: {threshold}")
 print(f"🎯 Wakeword threshold: {wakeword_threshold}")
 print(f"🤖 Using {args.model} model ({args.whisper_size if args.model == 'whisper' else 'default'})")
 print(f"🎧 Say '{character_wakeword or 'hey character'}' to activate, then ask your question")
+print("💡 Models have been preloaded for optimal performance")
 print("Press Ctrl+C to quit.")
 
 start_session = time.time()

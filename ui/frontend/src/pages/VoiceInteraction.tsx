@@ -64,6 +64,269 @@ interface KnowledgeReference {
 
 interface VoiceInteractionProps {}
 
+// Enhanced phonetic similarity functions for wake word detection
+const phoneticSimilarity = (word1: string, word2: string): boolean => {
+  if (!word1 || !word2) return false;
+  
+  // Normalize inputs
+  const w1 = word1.toLowerCase().trim();
+  const w2 = word2.toLowerCase().trim();
+  
+  // Exact match
+  if (w1 === w2) return true;
+  
+  // Check for substring matches (more lenient for names)
+  if (w1.length >= 3 && w2.includes(w1)) return true;
+  if (w2.length >= 3 && w1.includes(w2)) return true;
+  
+  // Length similarity (more lenient - within 3 characters for longer names)
+  const maxLength = Math.max(w1.length, w2.length);
+  const lengthDiff = Math.abs(w1.length - w2.length);
+  if (maxLength > 6 && lengthDiff > 3) return false;
+  if (maxLength <= 6 && lengthDiff > 2) return false;
+  
+  // Enhanced phonetic substitution map
+  const phoneticMap: Record<string, string[]> = {
+    'f': ['ph', 'v', 'ff'],
+    'v': ['f', 'ph', 'b'],
+    'c': ['k', 's', 'ch', 'ck'],
+    'k': ['c', 'ck', 'q'],
+    's': ['z', 'c', 'ss'],
+    'z': ['s', 'x'],
+    'i': ['y', 'e', 'ee'],
+    'y': ['i', 'ie'],
+    'e': ['i', 'ee', 'ea'],
+    'a': ['e', 'ai'],
+    'o': ['u', 'ou'],
+    'u': ['o', 'oo'],
+    'er': ['ur', 'or', 'ar'],
+    'ur': ['er', 'or', 'ir'],
+    'or': ['er', 'ur', 'ar'],
+    'ar': ['er', 'or'],
+    'th': ['t', 'd'],
+    't': ['th', 'd'],
+    'd': ['t', 'th'],
+    'ph': ['f', 'v'],
+    'ch': ['sh', 'k', 'c'],
+    'sh': ['ch', 's'],
+    'n': ['m', 'nn'],
+    'm': ['n', 'mm'],
+    'r': ['rr', 'l'],
+    'l': ['r', 'll']
+  };
+  
+  // Check if words start with similar sounds (more comprehensive)
+  if (w1[0] === w2[0] || (phoneticMap[w1[0]] && phoneticMap[w1[0]].includes(w2[0]))) {
+    // Calculate similarity ratio for words with similar starting sounds
+    let matchCount = 0;
+    const minLen = Math.min(w1.length, w2.length);
+    
+    for (let i = 0; i < minLen; i++) {
+      if (w1[i] === w2[i]) {
+        matchCount++;
+      } else if (phoneticMap[w1[i]] && phoneticMap[w1[i]].includes(w2[i])) {
+        matchCount += 0.8; // Partial credit for phonetic matches
+      } else if (phoneticMap[w2[i]] && phoneticMap[w2[i]].includes(w1[i])) {
+        matchCount += 0.8;
+      }
+    }
+    
+    const similarity = matchCount / Math.max(w1.length, w2.length);
+    if (similarity >= 0.6) return true; // 60% similarity threshold
+  }
+  
+  // Advanced substitution check with multi-character replacements
+  for (const [pattern, substitutes] of Object.entries(phoneticMap)) {
+    for (const substitute of substitutes) {
+      if (w1.includes(pattern) && w1.replace(pattern, substitute) === w2) return true;
+      if (w2.includes(pattern) && w2.replace(pattern, substitute) === w1) return true;
+      
+      // Try replacing all occurrences
+      if (w1.includes(pattern) && w1.split(pattern).join(substitute) === w2) return true;
+      if (w2.includes(pattern) && w2.split(pattern).join(substitute) === w1) return true;
+    }
+  }
+  
+  // Levenshtein distance for close matches
+  const editDistance = calculateEditDistance(w1, w2);
+  const maxLen = Math.max(w1.length, w2.length);
+  const similarity = 1 - (editDistance / maxLen);
+  
+  // More lenient threshold for shorter words
+  const threshold = maxLen <= 4 ? 0.5 : 0.6;
+  return similarity >= threshold;
+};
+
+// Simple Levenshtein distance calculation
+const calculateEditDistance = (str1: string, str2: string): number => {
+  const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
+  
+  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
+  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
+  
+  for (let j = 1; j <= str2.length; j++) {
+    for (let i = 1; i <= str1.length; i++) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(
+        matrix[j][i - 1] + 1,     // deletion
+        matrix[j - 1][i] + 1,     // insertion
+        matrix[j - 1][i - 1] + indicator // substitution
+      );
+    }
+  }
+  
+  return matrix[str2.length][str1.length];
+};
+
+const extractNameFromWakeword = (wakeword: string): string => {
+  const words = wakeword.toLowerCase().split(' ');
+  const greetings = ['hey', 'hi', 'hello', 'ok', 'okay'];
+  
+  for (const word of words) {
+    if (!greetings.includes(word) && word.length > 1) {
+      return word;
+    }
+  }
+  return words[words.length - 1] || '';
+};
+
+const checkForWakewordFuzzy = (transcript: string, wakeword: string): boolean => {
+  const transcriptLower = transcript.toLowerCase().trim();
+  const wakewordLower = wakeword.toLowerCase();
+  
+  // Early return for empty inputs
+  if (!transcriptLower || !wakewordLower) return false;
+  
+  // Direct pattern matching first (most reliable)
+  if (transcriptLower.includes(wakewordLower)) {
+    console.log(`🎯 Direct match: "${transcriptLower}" contains "${wakewordLower}"`);
+    return true;
+  }
+  
+  // Create more comprehensive variations
+  const wakewordVariations = [
+    wakewordLower,
+    wakewordLower.replace('hey ', 'hi '),
+    wakewordLower.replace('hey ', 'hello '),
+    wakewordLower.replace('hey ', 'ok '),
+    wakewordLower.replace('hey ', 'okay '),
+    wakewordLower.replace('hello ', 'hey '),
+    wakewordLower.replace('hi ', 'hey '),
+    ...(wakewordLower.startsWith('hey ') ? [wakewordLower.substring(4)] : []),
+    ...(wakewordLower.startsWith('hello ') ? [wakewordLower.substring(6)] : []),
+    ...(wakewordLower.startsWith('hi ') ? [wakewordLower.substring(3)] : [])
+  ];
+  
+  // Check direct variations
+  for (const variation of wakewordVariations) {
+    if (transcriptLower.includes(variation)) {
+      console.log(`🎯 Variation match: "${transcriptLower}" contains variation "${variation}"`);
+      return true;
+    }
+  }
+  
+  // Extract target name for fuzzy matching
+  const targetName = extractNameFromWakeword(wakeword);
+  if (!targetName) return false;
+  
+  const words = transcriptLower.split(/\s+/).filter(w => w.length > 0); // Handle multiple spaces
+  
+  // Enhanced single word matching with confidence scoring
+  for (const word of words) {
+    if (phoneticSimilarity(word, targetName)) {
+      console.log(`🎯 Phonetic match: "${word}" phonetically similar to "${targetName}"`);
+      return true;
+    }
+    
+    // Check if word is close enough to the target name
+    if (word.length >= 3 && targetName.length >= 3) {
+      if (word.includes(targetName.substring(0, 3)) || targetName.includes(word.substring(0, 3))) {
+        console.log(`🎯 Prefix match: "${word}" shares prefix with "${targetName}"`);
+        return true;
+      }
+    }
+  }
+  
+  // Enhanced greeting + name combinations
+  const greetings = ['hey', 'hi', 'hello', 'ok', 'okay', 'yo', 'ey'];
+  for (let i = 0; i < words.length - 1; i++) {
+    if (greetings.includes(words[i])) {
+      const nextWord = words[i + 1];
+      if (phoneticSimilarity(nextWord, targetName)) {
+        console.log(`🎯 Greeting + name match: "${words[i]} ${nextWord}" similar to "${words[i]} ${targetName}"`);
+        return true;
+      }
+      
+      // Check if next word contains part of target name
+      if (nextWord.length >= 3 && targetName.length >= 3) {
+        if (nextWord.includes(targetName.substring(0, 3)) || targetName.includes(nextWord.substring(0, 3))) {
+          console.log(`🎯 Greeting + partial match: "${words[i]} ${nextWord}" partially matches "${words[i]} ${targetName}"`);
+          return true;
+        }
+      }
+    }
+  }
+  
+  // Enhanced multi-word phrase detection
+  if (words.length >= 2) {
+    for (let i = 0; i < words.length - 1; i++) {
+      // Try different combinations
+      const combinations = [
+        words[i] + words[i + 1],                    // "for" + "me" = "forme"
+        words[i] + " " + words[i + 1],              // "for me" with space
+        words[i].substring(0, 2) + words[i + 1],    // "fo" + "me" = "fome"
+        words[i] + words[i + 1].substring(0, 2)     // "for" + "me" = "forme"
+      ];
+      
+      for (const combined of combinations) {
+        if (phoneticSimilarity(combined.replace(/\s/g, ''), targetName)) {
+          console.log(`🎯 Combined word match: "${words[i]} ${words[i + 1]}" (${combined}) phonetically similar to "${targetName}"`);
+          return true;
+        }
+      }
+    }
+  }
+  
+  // Three-word phrases with better handling
+  if (words.length >= 3) {
+    for (let i = 0; i < words.length - 2; i++) {
+      if (greetings.includes(words[i])) {
+        const combinations = [
+          words[i + 1] + words[i + 2],                      // "for" + "me" = "forme"
+          words[i + 1] + " " + words[i + 2],                // "for me" with space
+          words[i + 1].substring(0, 2) + words[i + 2]       // "fo" + "me" = "fome"
+        ];
+        
+        for (const combined of combinations) {
+          if (phoneticSimilarity(combined.replace(/\s/g, ''), targetName)) {
+            console.log(`🎯 Three-word match: "${words[i]} ${words[i + 1]} ${words[i + 2]}" (${combined}) similar to "${words[i]} ${targetName}"`);
+            return true;
+          }
+        }
+      }
+    }
+  }
+  
+  // Fallback: check if transcript contains any substantial part of the target name
+  if (targetName.length >= 4) {
+    const nameChunks = [
+      targetName.substring(0, 3),
+      targetName.substring(0, 4),
+      targetName.substring(1, 4),
+      targetName.substring(-3)
+    ];
+    
+    for (const chunk of nameChunks) {
+      if (chunk.length >= 3 && transcriptLower.includes(chunk)) {
+        console.log(`🎯 Chunk match: "${transcriptLower}" contains name chunk "${chunk}" from "${targetName}"`);
+        return true;
+      }
+    }
+  }
+  
+  return false;
+};
+
 const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -389,19 +652,8 @@ const VoiceInteraction: React.FC<VoiceInteractionProps> = () => {
               console.log('🎤 Interim transcript:', transcript);
             }
             
-            // Check for wake word variations in both interim and final results
-            const baseWakeword = characterWakeword.toLowerCase();
-            const wakeWords = [
-              baseWakeword,
-              baseWakeword.replace('hey ', 'hi '),
-              baseWakeword.replace('hey ', 'hello '),
-              // Extract just the name part if it starts with "hey"
-              ...(baseWakeword.startsWith('hey ') ? [baseWakeword.substring(4)] : [])
-            ];
-            
-            const containsWakeWord = wakeWords.some(wakeWord => 
-              transcript.includes(wakeWord)
-            );
+            // Enhanced wake word detection with phonetic similarity
+            const containsWakeWord = checkForWakewordFuzzy(transcript, characterWakeword);
             
             if (containsWakeWord && !isRecording && !isTranscribing && !isGeneratingResponse) {
               console.log('🚀 Wake word detected! Transcript:', transcript);
