@@ -3,7 +3,9 @@ from libraries.knowledgebase.preprocess import (
     ensure_character_collections_compatible,
     handle_character_embedding_model_change,
     delete_character_collections,
-    rename_character_collections
+    rename_character_collections,
+    cleanup_orphaned_collections,
+    list_all_collections
 )
 from libraries.knowledgebase.retrieval import (
     query_collection,
@@ -1247,7 +1249,9 @@ def create_character():
                                            'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
                                            'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
                                            'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
-                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation',
+                                           'f5_settings', 'xtts_settings', 'zonos_settings', 'f5_settings_modified',
+                                           'xtts_settings_modified', 'zonos_settings_modified'}
                         audio_processing_params = {
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
@@ -3094,7 +3098,9 @@ def update_character(character_id):
                                            'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
                                            'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
                                            'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
-                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation',
+                                           'f5_settings', 'xtts_settings', 'zonos_settings', 'f5_settings_modified',
+                                           'xtts_settings_modified', 'zonos_settings_modified'}
                         audio_processing_params = {
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
@@ -3167,7 +3173,9 @@ def update_character(character_id):
                                            'torch_force_no_weights_only_load', 'auto_download', 'gen_text',
                                            'generative_text', 'repetition_penalty', 'top_k', 'top_p', 'speed',
                                            'enable_text_splitting', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
-                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation'}
+                                           'seed', 'cfg_scale', 'speaking_rate', 'frequency_max', 'pitch_standard_deviation',
+                                           'f5_settings', 'xtts_settings', 'zonos_settings', 'f5_settings_modified',
+                                           'xtts_settings_modified', 'zonos_settings_modified'}
                         audio_processing_params = {
                             k: v for k, v in voice_cloning_settings.items()
                             if k not in tts_only_params
@@ -3849,6 +3857,46 @@ def unload_all_embedding_models():
     except Exception as e:
         print(f"Error unloading all embedding models: {e}")
         return jsonify({"error": "Failed to unload embedding models"}), 500
+
+
+@app.route('/list-all-collections', methods=['GET'])
+def list_all_collections_endpoint():
+    """
+    List all collections in the ChromaDB database with detailed information.
+    """
+    try:
+        collections_info = list_all_collections()
+        
+        return jsonify({
+            "collections": collections_info,
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/cleanup-orphaned-collections', methods=['POST'])
+def cleanup_orphaned_collections_endpoint():
+    """
+    Clean up orphaned collections from ChromaDB.
+    Optional JSON body: {"character_name": "character_name"} to clean up collections for a specific character.
+    """
+    try:
+        data = request.get_json() or {}
+        character_name = data.get('character_name')
+        
+        deleted_collections = cleanup_orphaned_collections(character_name)
+        
+        return jsonify({
+            "message": f"Cleaned up {len(deleted_collections)} orphaned collections",
+            "deleted_collections": deleted_collections,
+            "character_name": character_name,
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/preload-zonos-worker', methods=['POST'])

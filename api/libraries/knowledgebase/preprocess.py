@@ -57,6 +57,11 @@ except OSError:
         f"spaCy model '{SPACY_MODEL}' not found. Install with: python -m spacy download {SPACY_MODEL}")
 
 kw_model = KeyBERT()
+
+# Ensure ChromaDB directory exists
+os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+print(f"📁 ChromaDB directory: {os.path.abspath(CHROMA_DB_PATH)}")
+
 chroma_client = PersistentClient(path=CHROMA_DB_PATH)
 
 # Device detection for GPU acceleration
@@ -874,7 +879,7 @@ def process_json_document(file_path: str, source: str, embedding_config: Dict[st
         return []
 
 
-def list_collection_backups(collection_name: str = None) -> List[Dict[str, Any]]:
+def list_collection_backups(collection_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     List available collection backups.
     
@@ -1317,32 +1322,220 @@ def delete_character_collections(character_name: str) -> Dict[str, Any]:
     results = {
         "character_name": character_name,
         "knowledge_base": {"deleted": False},
-        "style_tuning": {"deleted": False}
+        "style_tuning": {"deleted": False},
+        "orphaned_collections": {"deleted": []}
     }
     
     collection_names = get_character_collection_names(character_name)
     
     # Delete knowledge base collection
     try:
-        chroma_client.delete_collection(collection_names["knowledge"])
-        results["knowledge_base"]["deleted"] = True
-        results["knowledge_base"]["message"] = f"Deleted collection '{collection_names['knowledge']}'"
-        print(f"✅ Deleted knowledge base collection: {collection_names['knowledge']}")
+        # Check if collection exists first
+        try:
+            chroma_client.get_collection(collection_names["knowledge"])
+            collection_exists = True
+        except Exception:
+            collection_exists = False
+        
+        if collection_exists:
+            chroma_client.delete_collection(collection_names["knowledge"])
+            results["knowledge_base"]["deleted"] = True
+            results["knowledge_base"]["message"] = f"Deleted collection '{collection_names['knowledge']}'"
+            print(f"✅ Deleted knowledge base collection: {collection_names['knowledge']}")
+        else:
+            results["knowledge_base"]["message"] = f"Collection '{collection_names['knowledge']}' does not exist"
+            print(f"ℹ️  Knowledge base collection '{collection_names['knowledge']}' does not exist")
     except Exception as e:
         results["knowledge_base"]["error"] = str(e)
         print(f"⚠️  Could not delete knowledge base collection '{collection_names['knowledge']}': {e}")
     
     # Delete style tuning collection
     try:
-        chroma_client.delete_collection(collection_names["style"])
-        results["style_tuning"]["deleted"] = True
-        results["style_tuning"]["message"] = f"Deleted collection '{collection_names['style']}'"
-        print(f"✅ Deleted style tuning collection: {collection_names['style']}")
+        # Check if collection exists first
+        try:
+            chroma_client.get_collection(collection_names["style"])
+            collection_exists = True
+        except Exception:
+            collection_exists = False
+        
+        if collection_exists:
+            chroma_client.delete_collection(collection_names["style"])
+            results["style_tuning"]["deleted"] = True
+            results["style_tuning"]["message"] = f"Deleted collection '{collection_names['style']}'"
+            print(f"✅ Deleted style tuning collection: {collection_names['style']}")
+        else:
+            results["style_tuning"]["message"] = f"Collection '{collection_names['style']}' does not exist"
+            print(f"ℹ️  Style tuning collection '{collection_names['style']}' does not exist")
     except Exception as e:
         results["style_tuning"]["error"] = str(e)
         print(f"⚠️  Could not delete style tuning collection '{collection_names['style']}': {e}")
     
+    # Clean up any orphaned collections that might be related to this character
+    try:
+        orphaned_collections = cleanup_orphaned_collections(character_name)
+        if orphaned_collections:
+            results["orphaned_collections"]["deleted"] = orphaned_collections
+            print(f"✅ Cleaned up {len(orphaned_collections)} orphaned collections for {character_name}")
+    except Exception as e:
+        results["orphaned_collections"]["error"] = str(e)
+        print(f"⚠️  Could not clean up orphaned collections for {character_name}: {e}")
+    
     return results
+
+
+def cleanup_orphaned_collections(character_name: Optional[str] = None) -> List[str]:
+    """
+    Clean up orphaned collections that may have been left behind.
+    
+    Args:
+        character_name: If provided, only clean up collections related to this character
+    
+    Returns:
+        List of deleted collection names
+    """
+    deleted_collections = []
+    
+    try:
+        # Get all collections
+        collections = chroma_client.list_collections()
+        
+        for collection in collections:
+            collection_name = collection.name
+            
+            # Skip collections that don't match the expected naming pattern
+            if not _is_character_collection(collection_name, character_name):
+                continue
+            
+            try:
+                # Check if this is an orphaned collection (UUID-based name or other issues)
+                if _is_orphaned_collection(collection_name, character_name):
+                    print(f"🧹 Cleaning up orphaned collection: {collection_name}")
+                    chroma_client.delete_collection(collection_name)
+                    deleted_collections.append(collection_name)
+            except Exception as e:
+                print(f"⚠️  Could not delete orphaned collection '{collection_name}': {e}")
+    
+    except Exception as e:
+        print(f"⚠️  Error listing collections for cleanup: {e}")
+    
+    return deleted_collections
+
+
+def _is_character_collection(collection_name: str, character_name: Optional[str] = None) -> bool:
+    """
+    Check if a collection name appears to be a character collection.
+    
+    Args:
+        collection_name: Name of the collection
+        character_name: If provided, check if it's specifically for this character
+    
+    Returns:
+        True if it appears to be a character collection
+    """
+    # Check for UUID-based names (these are likely orphaned)
+    if _is_uuid_name(collection_name):
+        return True
+    
+    # Check for standard character collection naming pattern
+    if '-knowledge' in collection_name or '-style' in collection_name:
+        if character_name:
+            expected_prefix = character_name.lower().replace(' ', '')
+            return collection_name.startswith(expected_prefix)
+        return True
+    
+    return False
+
+
+def _is_orphaned_collection(collection_name: str, character_name: Optional[str] = None) -> bool:
+    """
+    Check if a collection appears to be orphaned.
+    
+    Args:
+        collection_name: Name of the collection
+        character_name: If provided, check if it's specifically for this character
+    
+    Returns:
+        True if the collection appears to be orphaned
+    """
+    # UUID-based names are definitely orphaned
+    if _is_uuid_name(collection_name):
+        return True
+    
+    # If character_name is provided, check if this is a collection for this specific character
+    # that doesn't match the expected naming pattern
+    if character_name:
+        expected_names = get_character_collection_names(character_name)
+        if collection_name not in [expected_names["knowledge"], expected_names["style"]]:
+            # Check if it contains the character name but with wrong format
+            normalized_char_name = character_name.lower().replace(' ', '')
+            if normalized_char_name in collection_name.lower():
+                return True
+    
+    return False
+
+
+def _is_uuid_name(name: str) -> bool:
+    """
+    Check if a name appears to be a UUID.
+    
+    Args:
+        name: The name to check
+    
+    Returns:
+        True if the name appears to be a UUID
+    """
+    import re
+    # UUID pattern: 8-4-4-4-12 hex digits
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    return bool(re.match(uuid_pattern, name.lower()))
+
+
+def list_all_collections() -> Dict[str, Any]:
+    """
+    List all collections in the ChromaDB database with detailed information.
+    
+    Returns:
+        Dictionary with collection information
+    """
+    result = {
+        "total_collections": 0,
+        "character_collections": [],
+        "orphaned_collections": [],
+        "other_collections": []
+    }
+    
+    try:
+        collections = chroma_client.list_collections()
+        result["total_collections"] = len(collections)
+        
+        for collection in collections:
+            collection_name = collection.name
+            collection_info = {
+                "name": collection_name,
+                "count": 0,
+                "metadata": {}
+            }
+            
+            try:
+                # Get collection details
+                full_collection = chroma_client.get_collection(collection_name)
+                collection_info["count"] = full_collection.count()
+                collection_info["metadata"] = full_collection.metadata or {}
+            except Exception as e:
+                collection_info["error"] = str(e)
+            
+            # Categorize the collection
+            if _is_uuid_name(collection_name):
+                result["orphaned_collections"].append(collection_info)
+            elif '-knowledge' in collection_name or '-style' in collection_name:
+                result["character_collections"].append(collection_info)
+            else:
+                result["other_collections"].append(collection_info)
+    
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
 
 
 def rename_character_collections(old_character_name: str, new_character_name: str) -> Dict[str, Any]:

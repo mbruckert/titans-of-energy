@@ -332,7 +332,7 @@ const StyleTuningConfig = () => {
         <p className="text-gray-600">Upload conversation examples to fine-tune your character's response style</p>
         <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
           <p className="text-sm text-blue-800">
-            💡 <strong>Tip:</strong> Upload JSON files containing question-answer pairs that demonstrate how your character should respond. Format: [{'"question": "...", "response": "..."'}]
+            💡 <strong>Tip:</strong> Upload JSON files containing question-answer pairs that demonstrate how your character should respond. Format: {`[{"question": "...", "response": "..."}]`}
           </p>
         </div>
       </div>

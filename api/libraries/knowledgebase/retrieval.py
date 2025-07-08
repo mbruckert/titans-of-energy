@@ -35,6 +35,9 @@ load_dotenv()
 # Configuration
 CHROMA_DB_PATH = "./chroma_db"
 
+# Ensure ChromaDB directory exists
+os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+
 # Initialize ChromaDB persistent client
 chroma_client = chromadb.PersistentClient(CHROMA_DB_PATH)
 
