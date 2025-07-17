@@ -35,7 +35,7 @@ services:
       dockerfile: Dockerfile
       args:
         ENABLE_GPU: "true"
-        BASE_IMAGE: "nvidia/cuda:12.6-devel-ubuntu22.04"  # Use a known working CUDA tag
+        BASE_IMAGE: "nvidia/cuda:12.6.0-devel-ubuntu22.04"  # Use a known working CUDA tag
     depends_on:
       db:
         condition: service_healthy

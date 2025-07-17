@@ -1,7 +1,7 @@
 # Multi-platform Dockerfile with CUDA support when available
 # Works on Linux (with/without NVIDIA), Windows Docker Desktop, and macOS
 ARG ENABLE_GPU=auto
-ARG BASE_IMAGE=ubuntu:22.04
+ARG BASE_IMAGE=nvidia/cuda:12.6.0-devel-ubuntu22.04
 
 # Use CUDA image when GPU is explicitly enabled, otherwise use Ubuntu
 FROM ${BASE_IMAGE}
