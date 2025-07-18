@@ -30,7 +30,7 @@ services:
       dockerfile: Dockerfile
       args:
         ENABLE_GPU: "true"
-        BASE_IMAGE: "nvidia/cuda:12.1.1-devel-ubuntu22.04"  # Match PyTorch CUDA 12.1 version
+        BASE_IMAGE: "nvidia/cuda:12.1-devel-ubuntu22.04"  # Use available CUDA 12.1 image
     depends_on:
       db:
         condition: service_healthy
