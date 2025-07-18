@@ -1,9 +1,10 @@
-# docker-compose.gpu.yaml
-version: "3.8"
+version: "2.4"
 
 services:
   app:
-    device_requests:
-      - driver: nvidia
-        count: all
-        capabilities: [gpu]
+    # tell Compose v1 to use the NVIDIA runtime
+    runtime: nvidia
+    # (optional) make sure your ENV is set so the container sees all GPUs:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
