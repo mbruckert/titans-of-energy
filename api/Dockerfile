@@ -1,7 +1,7 @@
 # Multi-platform Dockerfile with CUDA support when available
 # Works on Linux (with/without NVIDIA), Windows Docker Desktop, and macOS
 ARG ENABLE_GPU=auto
-ARG BASE_IMAGE=nvidia/cuda:12.6.0-devel-ubuntu22.04
+ARG BASE_IMAGE=ubuntu:22.04
 
 # Use CUDA image when GPU is explicitly enabled, otherwise use Ubuntu
 FROM ${BASE_IMAGE}
@@ -80,20 +80,20 @@ RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 \
 # 3) Upgrade pip and install foundational packages
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
-    # 4) Install PyTorch - with CUDA support when available, CPU otherwise
-    RUN if [ -f /usr/local/cuda/bin/nvcc ] || [ "$ENABLE_GPU" = "true" ]; then \
-            echo "Installing PyTorch with CUDA support..." && \
-            pip3 install --no-cache-dir \
-                torch==2.1.2+cu121 \
-                torchaudio==2.1.2+cu121 \
-                --index-url https://download.pytorch.org/whl/cu121; \
-        else \
-            echo "Installing PyTorch CPU-only version..." && \
-            pip3 install --no-cache-dir \
-                torch==2.1.2 \
-                torchaudio==2.1.2 \
-                --index-url https://download.pytorch.org/whl/cpu; \
-        fi
+# 4) Install PyTorch - with CUDA support when available, CPU otherwise
+RUN if [ -f /usr/local/cuda/bin/nvcc ] || [ "$ENABLE_GPU" = "true" ]; then \
+        echo "Installing PyTorch with CUDA 12.1 support..." && \
+        pip3 install --no-cache-dir \
+            torch==2.1.2+cu121 \
+            torchaudio==2.1.2+cu121 \
+            --index-url https://download.pytorch.org/whl/cu121; \
+    else \
+        echo "Installing PyTorch CPU-only version..." && \
+        pip3 install --no-cache-dir \
+            torch==2.1.2 \
+            torchaudio==2.1.2 \
+            --index-url https://download.pytorch.org/whl/cpu; \
+    fi
 
 # 5) Install core dependencies in order
 RUN pip3 install --no-cache-dir \
@@ -154,7 +154,17 @@ ENV HF_HOME=/app/cache/huggingface \
 # 16) Expose port
 EXPOSE 5000
 
-# 17) Add healthcheck
+# 17) Add CUDA debugging tools and verification
+RUN if [ -f /usr/local/cuda/bin/nvcc ] || [ "$ENABLE_GPU" = "true" ]; then \
+        echo "Verifying CUDA installation..." && \
+        ls -la /usr/local/cuda/bin/ || echo "CUDA bin directory not found" && \
+        which nvcc || echo "nvcc not found" && \
+        nvcc --version || echo "nvcc version check failed" && \
+        echo "Checking PyTorch CUDA installation..." && \
+        python3 -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'Device count: {torch.cuda.device_count()}'); [print(f'Device {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())]" || echo "PyTorch CUDA check failed" \
+    ; fi
+
+# 18) Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:5000/ || exit 1
 
@@ -177,7 +187,7 @@ RUN echo '#!/bin/bash' > /app/start.sh \
  && echo '' >> /app/start.sh \
  && echo '# Verify critical dependencies' >> /app/start.sh \
  && echo 'echo "🔍 Verifying dependencies..."' >> /app/start.sh \
- && echo 'python3 -c "import torch; print(f\"✓ PyTorch: {torch.__version__}\"); print(f\"✓ CUDA available: {torch.cuda.is_available()}\")" || echo "❌ PyTorch/CUDA issue"' >> /app/start.sh \
+ && echo 'python3 -c "import torch; print(f\"✓ PyTorch: {torch.__version__}\"); print(f\"✓ CUDA available: {torch.cuda.is_available()}\"); print(f\"✓ CUDA version: {torch.version.cuda if torch.cuda.is_available() else \\\"N/A\\\"}\"); print(f\"✓ Device count: {torch.cuda.device_count()}\"); [print(f\"✓ Device {i}: {torch.cuda.get_device_name(i)}\") for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else None"' >> /app/start.sh \
  && echo 'python3 -c "import numpy; print(f\"✓ NumPy: {numpy.__version__}\")" || echo "❌ NumPy import failed"' >> /app/start.sh \
  && echo 'python3 -c "import librosa; print(f\"✓ Librosa: {librosa.__version__}\")" || echo "❌ Librosa import failed"' >> /app/start.sh \
  && echo 'python3 -c "import soundfile; print(f\"✓ SoundFile: {soundfile.__version__}\")" || echo "❌ SoundFile import failed"' >> /app/start.sh \
