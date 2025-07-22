@@ -30,25 +30,19 @@ A comprehensive AI platform for creating interactive virtual characters with voi
 ### Platform Support
 - **Cross-Platform**: Native support for Windows, macOS, and Linux
 - **GPU Acceleration**: NVIDIA CUDA and Apple Silicon (MPS) optimization
-- **Docker Support**: Containerized deployment with GPU support
 - **Device Optimization**: Automatic hardware detection and model optimization
 - **Performance Monitoring**: Model loading times and memory usage tracking
 
 ## 📋 Prerequisites
 
-### For Docker (Recommended)
-- Docker and Docker Compose
-- For GPU support: NVIDIA drivers and NVIDIA Container Toolkit (Linux/Windows)
-- 8GB+ RAM recommended
-- 10GB+ storage for models
-
-### For Native Installation
 - Python 3.8+ 
 - Node.js 16+ and npm
 - PostgreSQL database
 - Conda/Miniconda (recommended)
 - For GPU: NVIDIA drivers or Apple Silicon
 - For Zonos TTS: espeak-ng system package
+- 8GB+ RAM recommended
+- 10GB+ storage for models
 
 ### System Dependencies
 **Linux (Ubuntu/Debian):**
@@ -66,9 +60,9 @@ brew install espeak postgresql
 - Install PostgreSQL from official website
 - espeak-ng will be handled by the application
 
-## 🐳 Docker Installation (Recommended)
+## 💻 Installation
 
-### 1. Clone and Setup
+### 1. Clone Repository
 ```bash
 git clone <repository-url>
 cd titans-of-energy
@@ -77,45 +71,7 @@ cd titans-of-energy
 cp env.example .env
 ```
 
-### 2. Configure Environment
-Edit `.env` file with your API keys:
-```bash
-# Required API Keys (at least one recommended)
-OPENAI_API_KEY=your_actual_openai_api_key_here
-HUGGINGFACE_API_KEY=your_actual_huggingface_api_key_here
-
-# Database settings (pre-configured for Docker)
-DB_HOST=db
-DB_USER=titans_user
-DB_PASSWORD=titans_password
-DB_NAME=titans_db
-
-# Embedding Configuration (optional - defaults to sentence transformers)
-EMBEDDING_MODEL=text-embedding-ada-002
-```
-
-### 3. Start Services
-
-**CPU-only (works on all platforms):**
-```bash
-docker-compose up --build
-```
-
-**With NVIDIA GPU (Linux/Windows):**
-```bash
-docker-compose -f docker-compose.gpu.yaml up --build
-```
-
-**Services will be available at:**
-- Frontend: http://localhost:3000
-- API: http://localhost:5000
-- Database: Internal (PostgreSQL)
-
-For detailed Docker setup including Windows/WSL2 and troubleshooting, see [DOCKER_SETUP.md](DOCKER_SETUP.md).
-
-## 💻 Native Installation
-
-### 1. Database Setup
+### 2. Database Setup
 Install and start PostgreSQL, then create the database:
 ```sql
 CREATE DATABASE titans_db;
@@ -123,7 +79,7 @@ CREATE USER titans_user WITH PASSWORD 'titans_password';
 GRANT ALL PRIVILEGES ON DATABASE titans_db TO titans_user;
 ```
 
-### 2. Backend Setup
+### 3. Backend Setup
 ```bash
 # Create conda environment (recommended)
 conda create -n titans-energy python=3.10
@@ -154,7 +110,7 @@ EOF
 python app.py
 ```
 
-### 3. Frontend Setup
+### 4. Frontend Setup
 ```bash
 # In a new terminal, navigate to frontend
 cd ui/frontend
@@ -166,20 +122,24 @@ npm install
 npm run dev
 ```
 
-### 4. CLI Dependencies (Optional)
+### 5. CLI Dependencies (Optional)
 For the character interaction CLI:
 ```bash
 # Install CLI-specific dependencies
 pip install -r requirements-cli.txt
 ```
 
-### 5. TTS Model Dependencies (Automatic Setup)
+**Services will be available at:**
+- Frontend: http://localhost:3000
+- API: http://localhost:5000
+
+### 6. TTS Model Dependencies (Automatic Setup)
 The application automatically handles TTS model dependencies:
 
 **F5-TTS & XTTS-v2:**
-- Dependencies are automatically installed through Docker (see lines 128-131 in Dockerfile)
-- For native installation, they're handled in the Dockerfile configuration
-- **No manual installation required by users**
+- Dependencies are automatically installed through pip requirements
+- Manual installation: `pip install f5-tts TTS`
+- **No additional setup required**
 
 **Zonos (Experimental):**
 - Automatically sets up a separate conda environment (`tts_zonos`) on first startup
@@ -392,7 +352,6 @@ The system automatically detects and optimizes for:
 
 **GPU not detected:**
 - Update NVIDIA drivers
-- Install NVIDIA Container Toolkit (for Docker)
 - Check CUDA compatibility
 - Verify with: `python -c "import torch; print(torch.cuda.is_available())"`
 
@@ -461,7 +420,5 @@ titans-of-energy/
 │       ├── VoiceCloningUpload.tsx
 │       └── StyleTuningConfig.tsx
 ├── character_interaction.py # Voice interaction CLI
-├── docker-compose.yaml # Docker configuration
-├── DOCKER_SETUP.md     # Detailed Docker guide
 └── README.md           # This file
 ```
