@@ -991,6 +991,20 @@ def _generate_zonos(
     print(f"   • Output File: {output_file}")
     print(f"   • Config: {config}")
 
+    # Ensure Zonos environment is setup before attempting generation
+    print("🔧 Ensuring Zonos environment is setup...")
+    try:
+        # Import setup function from app module
+        import sys
+        import os
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+        from app import setup_zonos_environment
+        if not setup_zonos_environment():
+            raise RuntimeError("Zonos environment setup failed")
+    except Exception as e:
+        print(f"✗ Error setting up Zonos environment: {e}")
+        raise RuntimeError(f"Cannot generate Zonos audio: environment setup failed - {e}")
+
     # Try persistent worker first for better performance
     use_persistent = config.get('use_persistent_worker', True)
     device = config.get('torch_device', 'auto')
@@ -1345,6 +1359,24 @@ def preload_models_smart(models: List[str] = None, force_reload: bool = False):
     print(
         f"🚀 Smart preloading TTS models with {device_type.value} optimization: {models}")
 
+    # Check if any Zonos models need to be preloaded and setup environment if needed
+    zonos_models = [model for model in models if model.lower() == "zonos" or "zonos" in model.lower()]
+    if zonos_models:
+        print("🔧 Zonos model detected, ensuring environment is setup...")
+        try:
+            # Import setup function from app module
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+            from app import setup_zonos_environment
+            if not setup_zonos_environment():
+                print("✗ Failed to setup Zonos environment")
+                raise RuntimeError("Zonos environment setup failed")
+        except Exception as e:
+            print(f"✗ Error setting up Zonos environment: {e}")
+            # Remove Zonos models from the list if setup failed
+            models = [model for model in models if model.lower() != "zonos" and "zonos" not in model.lower()]
+
     for model in models:
         model_lower = model.lower()
         try:
@@ -1362,6 +1394,14 @@ def preload_models_smart(models: List[str] = None, force_reload: bool = False):
                 print("🔄 Preloading XTTS model into memory...")
                 _get_xtts_model(force_init=force_reload)
                 print("✓ XTTS model preloaded and cached in memory!")
+            elif model_lower == "zonos" or "zonos" in model_lower:
+                print("🔄 Preloading Zonos worker...")
+                zonos_model = "Zyphra/Zonos-v0.1-transformer" if model_lower == "zonos" else model
+                success = preload_zonos_worker(zonos_model)
+                if success:
+                    print("✓ Zonos worker preloaded and ready!")
+                else:
+                    print("✗ Failed to preload Zonos worker")
         except Exception as e:
             print(f"✗ Failed to preload {model}: {e}")
 

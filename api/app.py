@@ -125,6 +125,13 @@ def setup_zonos_environment():
     Automatically setup the Zonos conda environment if it doesn't exist.
     This ensures no manual setup is required for Zonos TTS functionality.
     """
+    global _zonos_environment_ready
+    
+    # Return early if already set up
+    if _zonos_environment_ready:
+        print("✓ Zonos environment already ready")
+        return True
+    
     print("\n" + "="*60)
     print("🔧 ZONOS ENVIRONMENT SETUP")
     print("="*60)
@@ -198,6 +205,7 @@ def setup_zonos_environment():
                 if result.returncode == 0 and "OK" in result.stdout:
                     print("✓ Zonos dependencies verified")
                     print("🎯 Zonos environment ready!")
+                    _zonos_environment_ready = True
                     return True
                 else:
                     print("⚠️  Zonos dependencies missing, reinstalling...")
@@ -227,6 +235,16 @@ def setup_zonos_environment():
         print("🔄 Setting up Zonos conda environment...")
         print("   This may take a few minutes on first run...")
         print("📦 Creating conda environment with Python 3.10...")
+        
+        # Add conda-forge channel for better package availability
+        print("📦 Adding conda-forge channel for better package availability...")
+        try:
+            subprocess.run([
+                conda_executable, 'config', '--add', 'channels', 'conda-forge'
+            ], capture_output=True, text=True, timeout=30)
+        except:
+            pass  # Channel might already exist
+        
         result = subprocess.run([
             conda_executable, 'create', '-n', conda_env_name, 'python=3.10', '-y'
         ], capture_output=True, text=True, timeout=300)
@@ -246,107 +264,193 @@ def setup_zonos_environment():
             if device_type == DeviceType.APPLE_SILICON:
                 # Apple Silicon - use conda-forge for better compatibility
                 torch_cmd = [
-                    conda_executable, 'install', '-n', conda_env_name, '-c', 'conda-forge',
-                    'pytorch', 'torchaudio', 'numpy', 'soundfile', '-y'
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'conda-forge', '-c', 'pytorch',
+                    'pytorch', 'torchaudio', 'numpy', '-y'
                 ]
             elif device_type == DeviceType.NVIDIA_GPU:
                 # NVIDIA GPU - use PyTorch with CUDA
                 torch_cmd = [
-                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch', '-c', 'nvidia',
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch', '-c', 'nvidia', '-c', 'conda-forge',
                     'pytorch', 'torchaudio', 'pytorch-cuda=11.8', '-y'
                 ]
             else:
                 # CPU only
                 torch_cmd = [
-                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch',
+                    conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch', '-c', 'conda-forge',
                     'pytorch', 'torchaudio', 'cpuonly', '-y'
                 ]
         else:
-            # Default installation
+            # Default installation - use both pytorch and conda-forge channels
             torch_cmd = [
-                conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch',
+                conda_executable, 'install', '-n', conda_env_name, '-c', 'pytorch', '-c', 'conda-forge',
                 'pytorch', 'torchaudio', '-y'
             ]
         
+        print(f"🔧 Running command: {' '.join(torch_cmd)}")
         result = subprocess.run(torch_cmd, capture_output=True, text=True, timeout=600)
         
         if result.returncode != 0:
             print(f"❌ Failed to install PyTorch: {result.stderr}")
-            return False
-        
-        print("✓ PyTorch installed successfully")
+            print(f"📊 Command output: {result.stdout}")
+            
+            # Try fallback installation without conda-forge if it failed
+            print("🔄 Trying fallback installation without conda-forge...")
+            fallback_cmd = [cmd for cmd in torch_cmd if cmd != '-c' and cmd != 'conda-forge']
+            # Remove duplicate -c flags that might be left over
+            cleaned_cmd = []
+            skip_next = False
+            for i, cmd in enumerate(fallback_cmd):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if cmd == '-c' and i + 1 < len(fallback_cmd):
+                    # Check if the next item is conda-forge (which we already removed)
+                    if fallback_cmd[i + 1] in cleaned_cmd:
+                        skip_next = True
+                        continue
+                cleaned_cmd.append(cmd)
+            
+            print(f"🔧 Trying fallback command: {' '.join(cleaned_cmd)}")
+            fallback_result = subprocess.run(cleaned_cmd, capture_output=True, text=True, timeout=600)
+            
+            if fallback_result.returncode != 0:
+                print(f"❌ Fallback installation also failed: {fallback_result.stderr}")
+                return False
+            else:
+                print("✓ Fallback PyTorch installation successful")
+        else:
+            print("✓ PyTorch installed successfully")
         
         # Install additional dependencies via pip
         print("📦 Installing additional dependencies...")
         pip_packages = [
             'soundfile',
             'numpy',
-            'librosa'
+            'librosa',
+            'resampy',
+            'einops',  # Often required for transformer models
+            'transformers',  # Likely needed for Zonos backbone
+            'accelerate'  # For optimized model loading
         ]
         
         for package in pip_packages:
             try:
-                result = subprocess.run([
-                    zonos_env_python, '-m', 'pip', 'install', package
-                ], capture_output=True, text=True, timeout=120)
+                # Special handling for soundfile which can be problematic
+                if package == 'soundfile':
+                    print(f"📦 Installing {package} with special handling...")
+                    # Try pip install first
+                    result = subprocess.run([
+                        zonos_env_python, '-m', 'pip', 'install', package
+                    ], capture_output=True, text=True, timeout=120)
+                    
+                    if result.returncode != 0:
+                        print(f"⚠️  Standard pip install failed for {package}, trying alternatives...")
+                        # Try with --no-binary flag
+                        result = subprocess.run([
+                            zonos_env_python, '-m', 'pip', 'install', '--no-binary', package, package
+                        ], capture_output=True, text=True, timeout=180)
+                        
+                        if result.returncode != 0:
+                            # Try installing libsndfile first if on Linux/macOS
+                            print(f"⚠️  Trying to install system dependencies for {package}...")
+                            try:
+                                import platform
+                                if platform.system() == 'Darwin':  # macOS
+                                    subprocess.run(['brew', 'install', 'libsndfile'], 
+                                                 capture_output=True, timeout=120)
+                                elif platform.system() == 'Linux':
+                                    subprocess.run(['sudo', 'apt-get', 'update'], 
+                                                 capture_output=True, timeout=60)
+                                    subprocess.run(['sudo', 'apt-get', 'install', '-y', 'libsndfile1-dev'], 
+                                                 capture_output=True, timeout=120)
+                            except:
+                                pass
+                            
+                            # Try again after installing system dependencies
+                            result = subprocess.run([
+                                zonos_env_python, '-m', 'pip', 'install', package
+                            ], capture_output=True, text=True, timeout=120)
+                else:
+                    # Standard installation for other packages
+                    result = subprocess.run([
+                        zonos_env_python, '-m', 'pip', 'install', package
+                    ], capture_output=True, text=True, timeout=120)
                 
                 if result.returncode == 0:
                     print(f"✓ Installed {package}")
                 else:
                     print(f"⚠️  Warning: Failed to install {package} via pip")
+                    if package == 'soundfile':
+                        print(f"💡 Hint: You may need to install libsndfile system package:")
+                        print(f"   macOS: brew install libsndfile")
+                        print(f"   Ubuntu/Debian: sudo apt-get install libsndfile1-dev")
+                        print(f"   The environment may still work without it, but audio functionality will be limited")
             except subprocess.TimeoutExpired:
                 print(f"⚠️  Warning: Timeout installing {package}")
             except Exception as e:
                 print(f"⚠️  Warning: Error installing {package}: {e}")
         
-        # Install Zonos from GitHub
-        print("📦 Installing Zonos from GitHub...")
-        result = subprocess.run([
-            zonos_env_python, '-m', 'pip', 'install', 
-            'git+https://github.com/Zyphra/Zonos.git'
+        # Install Zonos from GitHub using clone and editable install to ensure all submodules are included
+        print("📦 Installing Zonos from GitHub (cloning full repository for complete installation)...")
+        print("   This ensures all submodules like 'backbone' are included...")
+        
+        # Create a permanent directory for Zonos in the conda environment
+        zonos_src_dir = os.path.join(conda_env_path, 'src', 'Zonos')
+        os.makedirs(os.path.dirname(zonos_src_dir), exist_ok=True)
+        
+        # Remove existing directory if it exists
+        if os.path.exists(zonos_src_dir):
+            print(f"🗑️  Removing existing Zonos source at {zonos_src_dir}")
+            import shutil
+            shutil.rmtree(zonos_src_dir)
+        
+        # Clone the repository
+        print("📥 Cloning Zonos repository...")
+        clone_result = subprocess.run([
+            'git', 'clone', '--recursive', 'https://github.com/Zyphra/Zonos.git', zonos_src_dir
+        ], capture_output=True, text=True, timeout=180)
+        
+        if clone_result.returncode != 0:
+            print(f"❌ Failed to clone Zonos repository: {clone_result.stderr}")
+            return False
+        
+        print("✓ Zonos repository cloned successfully")
+        
+        # Install in editable mode to ensure all components are included
+        print("📦 Installing Zonos in editable mode...")
+        install_result = subprocess.run([
+            zonos_env_python, '-m', 'pip', 'install', '-e', zonos_src_dir
         ], capture_output=True, text=True, timeout=300)
         
-        if result.returncode != 0:
-            print(f"❌ Failed to install Zonos: {result.stderr}")
-            print("🔄 Trying alternative installation method...")
+        if install_result.returncode != 0:
+            print(f"❌ Failed to install Zonos in editable mode: {install_result.stderr}")
+            print(f"📊 Install output: {install_result.stdout}")
             
-            # Try cloning and installing manually
-            try:
-                import tempfile
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    clone_result = subprocess.run([
-                        'git', 'clone', 'https://github.com/Zyphra/Zonos.git', 
-                        os.path.join(temp_dir, 'Zonos')
-                    ], capture_output=True, text=True, timeout=120)
-                    
-                    if clone_result.returncode == 0:
-                        install_result = subprocess.run([
-                            zonos_env_python, '-m', 'pip', 'install', '-e', 
-                            os.path.join(temp_dir, 'Zonos')
-                        ], capture_output=True, text=True, timeout=300)
-                        
-                        if install_result.returncode != 0:
-                            print(f"❌ Alternative installation also failed: {install_result.stderr}")
-                            return False
-                    else:
-                        print(f"❌ Failed to clone Zonos repository: {clone_result.stderr}")
-                        return False
-            except Exception as e:
-                print(f"❌ Alternative installation failed: {e}")
+            # Try a fallback installation without editable mode
+            print("🔄 Trying fallback installation without editable mode...")
+            fallback_result = subprocess.run([
+                zonos_env_python, '-m', 'pip', 'install', zonos_src_dir
+            ], capture_output=True, text=True, timeout=300)
+            
+            if fallback_result.returncode != 0:
+                print(f"❌ Fallback installation also failed: {fallback_result.stderr}")
                 return False
+            else:
+                print("✓ Zonos installed successfully (fallback mode)")
+        else:
+            print("✓ Zonos installed successfully in editable mode")
         
-        print("✓ Zonos installed successfully")
-        
-        # Verify installation
-        print("🔍 Verifying Zonos installation...")
+        # Verify installation including the backbone module that was missing
+        print("🔍 Verifying Zonos installation (including backbone module)...")
         try:
+            # First try to verify with backbone module
             result = subprocess.run([
                 zonos_env_python, '-c', 
-                'import zonos.model; import torch; import torchaudio; print("Zonos installation verified")'
+                'import zonos.model; import zonos.backbone; import torch; import torchaudio; print("Zonos installation verified with all modules")'
             ], capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
-                print("✓ Zonos installation verified successfully")
+                print("✓ Zonos installation verified successfully with all required modules")
                 print("🎯 Zonos environment setup complete!")
                 
                 # Check for espeak-ng system installation
@@ -358,10 +462,39 @@ def setup_zonos_environment():
                     print("   Please install it with: brew install espeak-ng (macOS)")
                     print("   Zonos will attempt to locate it automatically")
                 
+                _zonos_environment_ready = True
                 return True
             else:
-                print(f"❌ Zonos verification failed: {result.stderr}")
-                return False
+                print(f"⚠️  Full verification failed: {result.stderr}")
+                print("🔄 Trying basic verification without backbone module...")
+                
+                # Fallback verification without backbone
+                basic_result = subprocess.run([
+                    zonos_env_python, '-c', 
+                    'import zonos.model; import torch; import torchaudio; print("Basic Zonos installation verified")'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if basic_result.returncode == 0:
+                    print("✓ Basic Zonos installation verified (backbone module may be missing)")
+                    print("⚠️  Warning: Some Zonos features may not work properly")
+                    print("💡 To fix backbone module issues, try manually:")
+                    print(f"   cd {zonos_src_dir}")
+                    print(f"   {zonos_env_python} -m pip install -e .")
+                    
+                    # Check for espeak-ng system installation
+                    espeak_check = subprocess.run(['which', 'espeak-ng'], capture_output=True, text=True)
+                    if espeak_check.returncode == 0:
+                        print(f"✓ espeak-ng found at: {espeak_check.stdout.strip()}")
+                    else:
+                        print("⚠️  espeak-ng not found in system PATH")
+                        print("   Please install it with: brew install espeak-ng (macOS)")
+                    
+                    _zonos_environment_ready = True
+                    return True
+                else:
+                    print(f"❌ Basic Zonos verification also failed: {basic_result.stderr}")
+                    print(f"📊 Basic verification output: {basic_result.stdout}")
+                    return False
                 
         except subprocess.TimeoutExpired:
             print("❌ Zonos verification timed out")
@@ -380,9 +513,6 @@ def setup_zonos_environment():
         print("="*60)
 
 
-# Setup Zonos environment on startup
-setup_zonos_environment()
-
 # Database configuration
 
 
@@ -398,6 +528,9 @@ def get_db_connection():
 
 # Global model cache
 model_cache = {}
+
+# Global flag to track Zonos environment setup
+_zonos_environment_ready = False
 
 
 def resolve_model_path(model_id: str) -> tuple[str, str]:
@@ -3903,6 +4036,7 @@ def cleanup_orphaned_collections_endpoint():
 def preload_zonos_worker_endpoint():
     """
     Preload a specific Zonos worker for faster subsequent generations.
+    This will also setup the Zonos environment if not already done.
     Expects: {"model": str, "device": str}
     """
     try:
@@ -3914,6 +4048,16 @@ def preload_zonos_worker_endpoint():
             return jsonify({"error": "model is required"}), 400
 
         print(f"🚀 Preloading Zonos worker for model: {model}")
+
+        # Setup Zonos environment before preloading
+        print("🔧 Setting up Zonos environment for preloading...")
+        if not setup_zonos_environment():
+            return jsonify({
+                "error": "Failed to setup Zonos environment",
+                "model": model,
+                "device": device,
+                "status": "failed"
+            }), 500
 
         # Import the preload function
         from libraries.tts.inference import preload_zonos_worker
